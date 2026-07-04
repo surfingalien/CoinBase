@@ -194,16 +194,19 @@ platform that spins down between requests.
    `backend/.env.example` (at minimum `WEBHOOK_SECRET`; add
    `COINBASE_API_KEY`/`COINBASE_API_SECRET` and flip
    `LIVE_TRADING_ENABLED=true` only once you're ready to go live).
-4. Deploy. Railway assigns a public URL — use `https://<that-url>/webhook/tradingview`
-   as the webhook URL in your TradingView alerts.
+4. Deploy. `backend/Dockerfile` is a two-stage build: it builds `frontend/`
+   with Node, then copies the result into the Python image's `./static`
+   directory, where FastAPI serves it at `/` (API routes at `/api`,
+   `/webhook`, `/health` still take priority). One Railway service, one
+   URL, no CORS or separate frontend deploy needed. **After the first
+   deploy, go to the service's Settings → Networking → Generate Domain**
+   — Railway never creates a public URL automatically. Use
+   `https://<that-url>/webhook/tradingview` as the webhook URL in your
+   TradingView alerts, and `https://<that-url>/` for the dashboard.
 5. **Persistence matters for a trading bot.** The default SQLite file lives
    on the container's ephemeral disk, which can reset on redeploy. Either
    attach a Railway volume mounted where `trading.db` lives, or switch
    `DATABASE_URL` to a Railway Postgres add-on before running with real money.
-
-For the frontend dashboard, deploy `frontend/` as a second Railway service
-(or any static host) and point its `vite.config.ts` proxy / API base URL at
-the backend service's public URL instead of `localhost:8000`.
 
 ## Going live on Coinbase
 
