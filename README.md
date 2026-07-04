@@ -48,9 +48,11 @@ backend/         FastAPI app (paper + live trading engine)
     market_analysis_monitor.py  background loop: analyzes every pair on a schedule
     routers/
       webhook.py    POST /webhook/tradingview
-      data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats
+      data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats,
+                    /api/positions/history, /api/config
     main.py         FastAPI app wiring
-frontend/        React + Vite + Tailwind dashboard
+frontend/        React + Vite + Tailwind dashboard (Dashboard / Portfolio /
+                 Signals / Risk Manager / Settings tabs, all live-data)
 pinescript/      5 TradingView strategies (Pine Script v5)
 website/         Standalone premium marketing landing page (index.html)
 ```
@@ -159,6 +161,23 @@ entry sizes for *every* strategy (webhook and native): extreme fear or greed
 cuts new-position size to 60%, elevated regimes to 80%. Sentiment never
 generates or vetoes a trade — it moderates the bet. Current snapshot is at
 `GET /api/sentiment`.
+
+## Live web research (optional, on by default)
+
+When `ANTHROPIC_API_KEY` is set and `ENABLE_WEB_RESEARCH=true` (the default),
+the batched Claude call in `market_analysis.py` is given Anthropic's
+server-side `web_search` tool. Claude is instructed to use it sparingly — at
+most one search per cycle, only for candidates where the cached Fear & Greed
+snapshot and RSS headlines might be missing something very recent (last 24h
+exchange listings, hacks, regulatory action, major partnership/ETF news) —
+before it commits to a BUY/SELL/HOLD call. This is on top of, not a
+replacement for, the cached sentiment/news feed: the cache covers the general
+regime cheaply, and the live search fills gaps only when the model decides
+it's needed.
+
+This is a real cost tradeoff against the token-efficiency work above: each
+search is billed separately from token usage. Set `ENABLE_WEB_RESEARCH=false`
+to run on cached sentiment/news alone with zero search cost.
 
 ## Risk framework (enforced, not aspirational)
 

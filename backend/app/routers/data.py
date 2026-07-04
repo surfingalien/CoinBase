@@ -2,9 +2,11 @@ from fastapi import APIRouter
 from sqlalchemy import select
 
 from app import sentiment as sentiment_mod
+from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
+from app.risk import compute_daily_pnl_pct
 
 router = APIRouter(prefix="/api", tags=["data"])
 
@@ -129,3 +131,77 @@ async def get_sentiment():
     """Current market sentiment snapshot: Fear & Greed index + headlines."""
     data = await sentiment_mod.get_market_sentiment()
     return data or {"fear_greed": None, "headlines": [], "disabled": True}
+
+
+@router.get("/positions/history")
+async def get_position_history(limit: int = 30):
+    """Closed positions with realized P&L and exit reason — real trade
+    history for the dashboard's Portfolio tab."""
+    async with async_session() as session:
+        closed = (await session.execute(
+            select(Position)
+            .where(Position.status == "closed")
+            .order_by(Position.closed_at.desc())
+            .limit(limit)
+        )).scalars().all()
+        return [
+            {
+                "id": p.id,
+                "symbol": p.symbol,
+                "size": p.size,
+                "entry_price": p.entry_price,
+                "exit_price": p.current_price,
+                "realized_pnl": p.realized_pnl,
+                "exit_reason": p.exit_reason,
+                "opened_at": p.opened_at.isoformat() if p.opened_at else None,
+                "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+            }
+            for p in closed
+        ]
+
+
+@router.get("/config")
+async def get_config():
+    """A safe (no secrets) snapshot of the risk/system configuration, plus
+    today's realized P&L against the daily loss limit — everything the
+    dashboard's Risk Manager and Settings tabs show is read straight from
+    the same settings object the trading pipeline actually enforces."""
+    exchange = get_exchange()
+    usd_balance = await exchange.get_usd_balance()
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        daily_pnl_pct = await compute_daily_pnl_pct(session, usd_balance, open_positions)
+
+    return {
+        "is_live": exchange.is_live,
+        "allowed_pairs": ALLOWED_PAIRS,
+        "risk_tiers": RISK_TIERS,
+        "risk": {
+            "max_position_pct_of_portfolio": settings.max_position_pct_of_portfolio,
+            "max_daily_loss_pct": settings.max_daily_loss_pct,
+            "max_open_positions": settings.max_open_positions,
+            "base_trade_size_usd": settings.base_trade_size_usd,
+            "daily_pnl_pct": daily_pnl_pct,
+            "daily_loss_limit_hit": daily_pnl_pct <= -settings.max_daily_loss_pct,
+        },
+        "exits": {
+            "take_profit_pct": settings.take_profit_pct,
+            "stop_loss_pct": settings.stop_loss_pct,
+            "trailing_stop_pct": settings.trailing_stop_pct,
+            "trailing_stop_activation_pct": settings.trailing_stop_activation_pct,
+        },
+        "ai": {
+            "anthropic_configured": bool(settings.anthropic_api_key),
+            "anthropic_model": settings.anthropic_model if settings.anthropic_api_key else None,
+            "market_analysis_poll_interval_seconds": settings.market_analysis_poll_interval_seconds,
+            "market_analysis_min_confidence": settings.market_analysis_min_confidence,
+            "signal_cooldown_minutes": settings.signal_cooldown_minutes,
+        },
+        "sentiment": {
+            "enabled": settings.sentiment_enabled,
+            "cache_minutes": settings.sentiment_cache_minutes,
+        },
+    }
