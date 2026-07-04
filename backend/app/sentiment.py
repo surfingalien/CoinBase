@@ -26,7 +26,9 @@ NEWS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
 ]
-MAX_HEADLINES = 8
+# Kept small deliberately — headlines feed an LLM prompt, and past ~5 the
+# marginal signal per token drops off fast.
+MAX_HEADLINES = 5
 
 _cache: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
 

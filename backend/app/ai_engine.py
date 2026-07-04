@@ -100,7 +100,9 @@ class AIEngine:
         if decision != "EXECUTE":
             confidence = min(confidence, 0.45)
 
-        if settings.anthropic_api_key and strategy != "Native_TA_AI":
+        # Token frugality: only executed trades earn an LLM-polished
+        # explanation — rejected signals keep the rule-based text.
+        if settings.anthropic_api_key and strategy != "Native_TA_AI" and decision == "EXECUTE":
             reasoning = await self._refine_with_llm(signal_data, decision, reasoning)
 
         return {

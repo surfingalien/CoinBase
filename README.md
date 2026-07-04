@@ -119,8 +119,24 @@ Alongside the TradingView webhooks, GainzAI runs its own analysis loop —
 4. The resulting signals feed through the same `ai_engine.py` → `risk.py` →
    `exchange.py` pipeline as the Pine Script webhooks, tagged with
    `strategy: "Native_TA_AI"`, on a schedule set by
-   `MARKET_ANALYSIS_POLL_INTERVAL_SECONDS` (default 15 minutes — each Claude
-   call costs money, so don't set this too aggressively if a key is configured).
+   `MARKET_ANALYSIS_POLL_INTERVAL_SECONDS` (default 15 minutes).
+
+**Token efficiency.** LLM spend is engineered down three ways:
+
+- **Gate** — symbols are scored by the free rule-based confluence check
+  first; only setups with meaningful directional agreement reach Claude.
+  In a choppy market a whole poll cycle costs zero LLM tokens.
+- **Batch** — all gated candidates share **one** Claude call per cycle, so
+  the instructions and the sentiment/news block are paid for once, not once
+  per symbol (previously up to 15 calls per cycle).
+- **Compress** — each candidate is a single dense TA line
+  (`BTC-USD: price=64500 ATR=350 6h=bullish RSI=62 MACD=bullish/increasing …`)
+  instead of a multi-line indicator dump, headlines are capped at 5, and
+  reasoning is limited to one sentence. Dashboard reasoning polish runs only
+  for trades that actually execute.
+
+Net effect: a typical cycle drops from ~15 LLM calls (~10-15k tokens) to at
+most one compact call (~1-2k tokens), and often none.
 5. When this analysis supplies its own ATR-based stop-loss/take-profit for a
    position, `position_monitor.py` uses those exact price levels instead of
    the global `TAKE_PROFIT_PCT`/`STOP_LOSS_PCT` percentages.
