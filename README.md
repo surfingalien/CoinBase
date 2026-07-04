@@ -11,7 +11,8 @@ FastAPI backend
   ├─ ai_engine.py   → per-strategy confirmation logic + confidence score
   ├─ risk.py        → position sizing, per-trade cap, daily loss ceiling
   ├─ exchange.py     → MockExchange (paper) or CoinbaseExchange (live, opt-in)
-  └─ trading.py      → orchestrates signal → decision → order → position
+  ├─ trading.py       → orchestrates signal → decision → order → position
+  └─ position_monitor.py → watches open positions, auto-sells at take-profit / stop-loss
         │
         ▼
 SQLite (signals, orders, positions)
@@ -36,6 +37,7 @@ backend/         FastAPI app (paper + live trading engine)
     ai_engine.py    per-strategy signal confirmation + confidence scoring
     risk.py         position sizing and hard risk caps
     trading.py      the webhook → decision → order pipeline
+    position_monitor.py  background loop: auto take-profit / stop-loss exits
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats
@@ -101,6 +103,20 @@ backend on port 8000.
 
 **Do this only after you've reviewed the signal history in paper mode** and
 are comfortable with the strategies' behavior.
+
+## Automatic profit booking & stop-loss
+
+Placing an entry order is only half the job — `app/position_monitor.py` runs
+as a background task from the moment the backend starts, polling every open
+position every `POSITION_MONITOR_INTERVAL_SECONDS` (default 30s) and selling
+automatically the instant unrealized P&L crosses either threshold:
+
+- `TAKE_PROFIT_PCT` (default 8%) — books the win
+- `STOP_LOSS_PCT` (default 4%) — cuts the loss
+
+This runs against whichever exchange is active (paper `MockExchange` or live
+`CoinbaseExchange`), so you can watch full entry-to-exit cycles play out in
+the dashboard before ever setting `LIVE_TRADING_ENABLED=true`.
 
 ## Risk
 

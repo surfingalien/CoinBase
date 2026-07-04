@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from app import position_monitor
 from app.database import init_db
 from app.routers import data, webhook
 
@@ -12,7 +13,9 @@ from app.routers import data, webhook
 async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
+    position_monitor.start()
     yield
+    await position_monitor.stop()
 
 
 app = FastAPI(title="GainzAI Crypto Trading System", lifespan=lifespan)

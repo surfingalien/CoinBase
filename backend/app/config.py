@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = 0.05
     base_trade_size_usd: float = 1000.0
 
+    # Automatic exit management: the position monitor closes a position the
+    # moment its unrealized P&L crosses either threshold.
+    take_profit_pct: float = 0.08
+    stop_loss_pct: float = 0.04
+    position_monitor_interval_seconds: int = 30
+
 
 settings = Settings()
 
