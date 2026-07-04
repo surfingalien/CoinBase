@@ -1,7 +1,9 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app import market_analysis_monitor, position_monitor
@@ -30,6 +32,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Registered before the static mount below so /webhook, /api, and /health
+# always win — Starlette matches routes in registration order.
 app.include_router(webhook.router)
 app.include_router(data.router)
 
@@ -37,3 +41,15 @@ app.include_router(data.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# The Docker build copies the built React dashboard into ./static (see
+# backend/Dockerfile). In local dev without a build, this directory won't
+# exist, so the API still runs fine on its own — the mount is skipped rather
+# than crashing the app.
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="dashboard")
+    logger.info("Serving React dashboard from ./static")
+else:
+    logger.info("No ./static directory found — dashboard not served (API-only mode)")
