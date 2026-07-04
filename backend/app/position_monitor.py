@@ -41,12 +41,22 @@ async def _check_and_close_positions() -> None:
             position.current_price = current_price
             position.unrealized_pnl = (current_price - position.entry_price) * position.size
 
-            exit_reason = None
-            if pnl_pct >= settings.take_profit_pct:
-                exit_reason = "take_profit"
-            elif pnl_pct <= -settings.stop_loss_pct:
-                exit_reason = "stop_loss"
+            # Prefer exact levels supplied by the originating signal (e.g.
+            # FinSurfing's AI-computed stop-loss/take-profit) over the global
+            # percentage thresholds, since those account for the asset's own
+            # volatility (ATR) rather than one fixed number for every symbol.
+            # Each side falls back to the percentage threshold independently
+            # when the signal didn't supply that particular level.
+            hit_take_profit = (
+                current_price >= position.take_profit_price if position.take_profit_price
+                else pnl_pct >= settings.take_profit_pct
+            )
+            hit_stop_loss = (
+                current_price <= position.stop_loss_price if position.stop_loss_price
+                else pnl_pct <= -settings.stop_loss_pct
+            )
 
+            exit_reason = "take_profit" if hit_take_profit else "stop_loss" if hit_stop_loss else None
             if exit_reason is None:
                 continue
 

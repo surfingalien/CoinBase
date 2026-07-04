@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     stop_loss_pct: float = 0.04
     position_monitor_interval_seconds: int = 30
 
+    # FinSurfing integration: an external app (github.com/surfingalien/finsurfing)
+    # that renders live TradingView charts and runs a Claude-based technical
+    # analysis engine (RSI/MACD/EMA/BB/ATR/ADX/S&R/patterns -> structured
+    # BUY/SELL/HOLD signal). When configured, GainzAI polls it as an
+    # additional signal source alongside the TradingView Pine Script webhooks.
+    finsurfing_base_url: str = ""
+    finsurfing_api_token: str = ""
+    finsurfing_poll_interval_seconds: int = 900
+    finsurfing_min_confidence: float = 0.60
+    finsurfing_interval: str = "60"  # TradingView-style interval: 1,5,15,30,60,240,D,W
+
 
 settings = Settings()
 
@@ -48,4 +59,5 @@ KNOWN_STRATEGIES = {
     "Breakout_Hunter",
     "VWAP_Bounce_Bot",
     "Scalp_Momentum",
+    "FinSurfing_AI",
 }

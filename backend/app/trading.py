@@ -91,6 +91,8 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
                 size=order_result["filled_size"],
                 entry_price=order_result["avg_price"],
                 current_price=order_result["avg_price"],
+                take_profit_price=signal_data.get("finsurfing_take_profit"),
+                stop_loss_price=signal_data.get("finsurfing_stop_loss"),
             ))
         elif signal_data["action"] == "SELL":
             open_positions = (await session.execute(

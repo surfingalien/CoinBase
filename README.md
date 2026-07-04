@@ -4,15 +4,16 @@ An end-to-end system that turns TradingView technical signals into risk-managed,
 AI-reviewed trades on Coinbase, plus a live dashboard and a marketing landing page.
 
 ```
-TradingView (Pine Script strategies)
-        │  webhook (JSON + shared secret)
-        ▼
-FastAPI backend
+TradingView (Pine Script strategies)     FinSurfing (TradingView charts + Claude analysis)
+        │  webhook (JSON + shared secret)         │  polled every N minutes
+        ▼                                         ▼
+              FastAPI backend
   ├─ ai_engine.py   → per-strategy confirmation logic + confidence score
   ├─ risk.py        → position sizing, per-trade cap, daily loss ceiling
   ├─ exchange.py     → MockExchange (paper) or CoinbaseExchange (live, opt-in)
   ├─ trading.py       → orchestrates signal → decision → order → position
-  └─ position_monitor.py → watches open positions, auto-sells at take-profit / stop-loss
+  ├─ position_monitor.py → watches open positions, auto-sells at take-profit / stop-loss
+  └─ finsurfing_monitor.py → polls FinSurfing's AI analysis as an extra signal source
         │
         ▼
 SQLite (signals, orders, positions)
@@ -38,6 +39,8 @@ backend/         FastAPI app (paper + live trading engine)
     risk.py         position sizing and hard risk caps
     trading.py      the webhook → decision → order pipeline
     position_monitor.py  background loop: auto take-profit / stop-loss exits
+    finsurfing_client.py   calls FinSurfing's AI analysis endpoint
+    finsurfing_monitor.py  background loop: polls FinSurfing for every pair
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats
@@ -90,6 +93,38 @@ backend on port 8000.
    `https://<your-domain>/webhook/tradingview`.
 4. Repeat per pair/timeframe. The backend accepts alerts from all five
    strategies concurrently — `ai_engine.py` routes each by its `strategy` field.
+
+## Connecting FinSurfing (optional second signal source)
+
+[FinSurfing](https://github.com/surfingalien/finsurfing) is a separate app
+that embeds TradingView's own chart widget and runs a Claude-based technical
+analysis engine (RSI/MACD/EMA/Bollinger/ATR/ADX/support-resistance/pattern
+detection) to produce a structured BUY/SELL/HOLD signal with its own
+confidence, stop-loss, and take-profit. GainzAI can poll it as an additional,
+independent signal source alongside (not instead of) the TradingView
+webhooks — useful since it reasons over live charts on a schedule rather than
+waiting for a Pine Script condition to fire.
+
+1. Deploy FinSurfing (it runs as its own Node/Express app) and note its public URL.
+2. Generate an API token: FinSurfing's `/api/trading-analysis/analyze` route
+   requires a JWT signed with FinSurfing's `JWT_SECRET`. The simplest path is
+   to log in to FinSurfing normally and copy your access token; for a
+   long-running bot you'll want a dedicated service-account token instead so
+   it doesn't expire with your session.
+3. In `backend/.env`, set `FINSURFING_BASE_URL` (FinSurfing's URL) and
+   `FINSURFING_API_TOKEN` (the JWT from step 2). Leave both blank to disable
+   this integration entirely — everything else works the same without it.
+4. Restart the backend. `finsurfing_monitor.py` will poll every pair in
+   `ALLOWED_PAIRS` every `FINSURFING_POLL_INTERVAL_SECONDS` (default 15
+   minutes — each call triggers an LLM analysis on FinSurfing's side, so
+   don't set this too aggressively), feeding BUY/SELL calls through the same
+   `ai_engine.py` → `risk.py` → `exchange.py` pipeline as everything else,
+   tagged with `strategy: "FinSurfing_AI"`.
+5. When FinSurfing supplies its own stop-loss/take-profit for a position,
+   `position_monitor.py` uses those exact price levels instead of the global
+   `TAKE_PROFIT_PCT`/`STOP_LOSS_PCT` percentages — FinSurfing's levels are
+   ATR-based per symbol, which is more precise than one fixed percentage
+   applied to every asset.
 
 ## Going live on Coinbase
 

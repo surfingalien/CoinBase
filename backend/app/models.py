@@ -59,3 +59,9 @@ class Position(Base):
     status = Column(String, default="open")  # open, closed
     opened_at = Column(DateTime, default=_now)
     closed_at = Column(DateTime, nullable=True)
+
+    # Absolute exit prices, set when the originating signal supplied its own
+    # (e.g. FinSurfing's AI analysis). When null, the position monitor falls
+    # back to the global TAKE_PROFIT_PCT / STOP_LOSS_PCT percentages.
+    take_profit_price = Column(Float, nullable=True)
+    stop_loss_price = Column(Float, nullable=True)
