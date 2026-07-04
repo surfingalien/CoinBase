@@ -1,14 +1,21 @@
 """Automatic exit management.
 
-Placing an entry order is only half of "fully automated" — something also
-has to watch the position afterward and sell it, since no one is staring at
-a screen. This loop polls every open position on a fixed interval and closes
-it the instant unrealized P&L crosses the take-profit or stop-loss threshold
-configured in .env, using whichever exchange (paper or live Coinbase) the
-rest of the app is wired to.
+Placing an entry order is only half of "fully automated" — this loop watches
+every open position and sells it the moment an exit condition fires, using
+whichever exchange (paper or live Coinbase) the rest of the app is wired to.
+
+Exit conditions, in priority order:
+1. take_profit — price reached the target (signal-supplied ATR level, or the
+   global TAKE_PROFIT_PCT fallback).
+2. trailing_stop — the position was up at least TRAILING_STOP_ACTIVATION_PCT
+   at its peak, and price has since fallen TRAILING_STOP_PCT below that peak.
+   This lets winners run past the fixed target while locking in most of the
+   move.
+3. stop_loss — price hit the protective floor (signal-supplied level, or the
+   global STOP_LOSS_PCT fallback).
 """
 import asyncio
-from datetime import datetime, timezone
+from typing import Optional
 
 from loguru import logger
 from sqlalchemy import select
@@ -16,10 +23,37 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import async_session
 from app.exchange import get_exchange
-from app.models import Order, Position
+from app.models import Position
+from app.trading import _close_position
 
 _task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
+
+
+def _exit_reason(position: Position, current_price: float) -> Optional[str]:
+    entry = position.entry_price
+    pnl_pct = (current_price - entry) / entry
+
+    hit_take_profit = (
+        current_price >= position.take_profit_price if position.take_profit_price
+        else pnl_pct >= settings.take_profit_pct
+    )
+    if hit_take_profit:
+        return "take_profit"
+
+    if settings.trailing_stop_pct > 0 and position.peak_price:
+        armed = position.peak_price >= entry * (1 + settings.trailing_stop_activation_pct)
+        if armed and current_price <= position.peak_price * (1 - settings.trailing_stop_pct):
+            return "trailing_stop"
+
+    hit_stop_loss = (
+        current_price <= position.stop_loss_price if position.stop_loss_price
+        else pnl_pct <= -settings.stop_loss_pct
+    )
+    if hit_stop_loss:
+        return "stop_loss"
+
+    return None
 
 
 async def _check_and_close_positions() -> None:
@@ -37,54 +71,21 @@ async def _check_and_close_positions() -> None:
                 logger.exception(f"Could not fetch price for {position.symbol}; skipping this cycle")
                 continue
 
-            pnl_pct = (current_price - position.entry_price) / position.entry_price
             position.current_price = current_price
             position.unrealized_pnl = (current_price - position.entry_price) * position.size
+            position.peak_price = max(position.peak_price or position.entry_price, current_price)
 
-            # Prefer exact levels supplied by the originating signal (e.g.
-            # FinSurfing's AI-computed stop-loss/take-profit) over the global
-            # percentage thresholds, since those account for the asset's own
-            # volatility (ATR) rather than one fixed number for every symbol.
-            # Each side falls back to the percentage threshold independently
-            # when the signal didn't supply that particular level.
-            hit_take_profit = (
-                current_price >= position.take_profit_price if position.take_profit_price
-                else pnl_pct >= settings.take_profit_pct
-            )
-            hit_stop_loss = (
-                current_price <= position.stop_loss_price if position.stop_loss_price
-                else pnl_pct <= -settings.stop_loss_pct
-            )
-
-            exit_reason = "take_profit" if hit_take_profit else "stop_loss" if hit_stop_loss else None
-            if exit_reason is None:
+            reason = _exit_reason(position, current_price)
+            if reason is None:
                 continue
 
-            quote_size = position.size * current_price
-            order_result = await exchange.place_market_order(
-                symbol=position.symbol, side="SELL", quote_size=quote_size,
-            )
-
-            if not order_result.get("success"):
-                logger.error(f"Auto-exit SELL failed for {position.symbol}: {order_result.get('error')}")
-                continue
-
-            session.add(Order(
-                symbol=position.symbol,
-                side="SELL",
-                quote_size_usd=quote_size,
-                size=order_result["filled_size"],
-                avg_fill_price=order_result["avg_price"],
-                status="filled",
-                is_live=exchange.is_live,
-            ))
-            position.status = "closed"
-            position.closed_at = datetime.now(timezone.utc)
-
-            logger.info(
-                f"[AUTO-EXIT:{exit_reason}] Closed {position.symbol} at ${current_price:,.2f} "
-                f"({pnl_pct:+.2%} vs entry ${position.entry_price:,.2f})"
-            )
+            if await _close_position(session, exchange, position, reason):
+                pnl_pct = (current_price - position.entry_price) / position.entry_price
+                logger.info(
+                    f"[AUTO-EXIT:{reason}] Closed {position.symbol} at ${current_price:,.2f} "
+                    f"({pnl_pct:+.2%} vs entry ${position.entry_price:,.2f}, "
+                    f"realized ${position.realized_pnl:+,.2f})"
+                )
 
         await session.commit()
 
@@ -92,7 +93,9 @@ async def _check_and_close_positions() -> None:
 async def _run_loop(stop_event: asyncio.Event) -> None:
     logger.info(
         f"Position monitor started (take_profit={settings.take_profit_pct:.1%}, "
-        f"stop_loss={settings.stop_loss_pct:.1%}, interval={settings.position_monitor_interval_seconds}s)"
+        f"stop_loss={settings.stop_loss_pct:.1%}, "
+        f"trailing={settings.trailing_stop_pct:.1%} after +{settings.trailing_stop_activation_pct:.1%}, "
+        f"interval={settings.position_monitor_interval_seconds}s)"
     )
     while not stop_event.is_set():
         try:

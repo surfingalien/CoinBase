@@ -8,8 +8,6 @@ class Settings(BaseSettings):
     coinbase_api_secret: str = ""
     live_trading_enabled: bool = False
 
-    openai_api_key: str = ""
-
     webhook_secret: str = "change_me_to_a_long_random_string"
     database_url: str = "sqlite+aiosqlite:///./trading.db"
 
@@ -17,11 +15,31 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = 0.05
     base_trade_size_usd: float = 1000.0
 
+    # Portfolio-level exposure limits: the system is long-only spot, holds at
+    # most one position per symbol, and caps how many symbols it holds at once.
+    max_open_positions: int = 5
+
     # Automatic exit management: the position monitor closes a position the
-    # moment its unrealized P&L crosses either threshold.
+    # moment its unrealized P&L crosses either threshold. The trailing stop
+    # arms once a position is up trailing_stop_activation_pct, then sells if
+    # price falls trailing_stop_pct below its peak — letting winners run
+    # while still locking in most of the gain. Set trailing_stop_pct=0 to
+    # disable trailing and use the fixed take-profit only.
     take_profit_pct: float = 0.08
     stop_loss_pct: float = 0.04
+    trailing_stop_pct: float = 0.03
+    trailing_stop_activation_pct: float = 0.04
     position_monitor_interval_seconds: int = 30
+
+    # Market sentiment: Crypto Fear & Greed Index (alternative.me, free, no
+    # key) plus recent crypto news headlines (public RSS). Injected into the
+    # analysis prompt and used to damp position sizes in extreme regimes.
+    sentiment_enabled: bool = True
+    sentiment_cache_minutes: int = 30
+
+    # Minimum minutes between two native-analysis signals for the same symbol,
+    # so a persistently bullish chart doesn't spam the pipeline every cycle.
+    signal_cooldown_minutes: int = 60
 
     # Native technical + AI analysis: computes RSI/MACD/EMA/BB/ATR/ADX/S&R/
     # patterns directly from Coinbase's own public candle data (no external

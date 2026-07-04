@@ -129,6 +129,41 @@ This runs unconditionally — there's nothing to deploy separately and nothing
 to authenticate against. Leave `ANTHROPIC_API_KEY` blank to run purely on the
 rule-based fallback.
 
+## Market sentiment & news
+
+`app/sentiment.py` pulls two free, keyless sources on a cache
+(`SENTIMENT_CACHE_MINUTES`, default 30):
+
+- the **Crypto Fear & Greed Index** (alternative.me) — the market-regime gauge
+- recent **crypto news headlines** (CoinDesk / Cointelegraph RSS)
+
+Both are injected into the Claude analysis prompt so signals are weighed
+against what's actually moving the market, and the Fear & Greed regime damps
+entry sizes for *every* strategy (webhook and native): extreme fear or greed
+cuts new-position size to 60%, elevated regimes to 80%. Sentiment never
+generates or vetoes a trade — it moderates the bet. Current snapshot is at
+`GET /api/sentiment`.
+
+## Risk framework (enforced, not aspirational)
+
+- **Long-only spot** — SELL signals close existing positions; shorting is rejected.
+- **One position per symbol, `MAX_OPEN_POSITIONS` symbols max** — repeated
+  bullish signals can't stack exposure.
+- **Per-trade cap** — `MAX_POSITION_PCT_OF_PORTFOLIO` of equity per entry.
+- **Daily loss circuit-breaker** — realized P&L is tracked per position; once
+  today's realized losses cross `MAX_DAILY_LOSS_PCT` of portfolio value, all
+  new entries are refused until the next UTC day.
+- **Three exit paths** — fixed take-profit, protective stop-loss, and a
+  **trailing stop** that arms once a position is up
+  `TRAILING_STOP_ACTIVATION_PCT` and sells if price falls `TRAILING_STOP_PCT`
+  from its peak, letting winners run while locking in most of the gain.
+  Signal-supplied ATR-based levels take precedence over the global percentages.
+- **Higher-timeframe confirmation** — native analysis checks the 6h trend;
+  counter-trend entries need much stronger evidence and get lower confidence.
+- **Realistic paper trading** — paper mode marks to Coinbase's real public
+  ticker and keeps a holdings ledger, so paper results mean something before
+  you risk a dollar.
+
 ## Deploying (Railway)
 
 The bot runs two long-lived background loops (`position_monitor.py`,

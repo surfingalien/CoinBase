@@ -1,18 +1,23 @@
 """Signal decision engine.
 
-Every TradingView alert lands here before an order is ever placed. Each
-strategy has its own confirmation logic (the same indicators the Pine Script
-computed are re-checked server-side, since a webhook payload can't be trusted
-blindly), and the result carries a confidence score and a position-size
-multiplier that downstream risk logic uses to size the trade.
+Every signal — TradingView webhook or native analysis — lands here before an
+order is ever placed. Each strategy has its own confirmation logic (the same
+indicators the Pine Script computed are re-checked server-side, since a
+webhook payload can't be trusted blindly), and the result carries a
+confidence score and a position-size multiplier that downstream risk logic
+uses to size the trade.
 
-If OPENAI_API_KEY is set, the engine asks an LLM to sanity-check the
-rule-based verdict and produce the human-readable reasoning; otherwise the
-rule-based reasoning is used directly. Either way, the rule-based checks are
-the actual gate — the LLM never overrides a REJECT into an EXECUTE.
+Market sentiment (Fear & Greed regime) damps the size multiplier for every
+strategy: extreme regimes don't veto a technically sound entry, they shrink
+the bet. If ANTHROPIC_API_KEY is set, Claude rewrites the rule-based
+reasoning for the dashboard — the rule-based checks remain the actual gate;
+the LLM never overrides a REJECT into an EXECUTE.
 """
 from typing import Any, Dict
 
+from loguru import logger
+
+from app import sentiment as sentiment_mod
 from app.config import RISK_TIERS, settings
 
 
@@ -21,7 +26,7 @@ class AIEngine:
         symbol = signal_data.get("symbol", "")
         strategy = signal_data.get("strategy", "Unknown")
         action = signal_data.get("action", "HOLD")
-        rsi = float(signal_data.get("rsi", 50))
+        rsi = float(signal_data.get("rsi") or 50)
         risk_weight = RISK_TIERS.get(symbol, 1.5)
 
         decision = "REJECT"
@@ -76,10 +81,26 @@ class AIEngine:
             size_multiplier /= risk_weight
             reasoning += f" Position size reduced {risk_weight:.1f}x for asset volatility tier."
 
+        # Sentiment regime damping applies to new entries only — exits should
+        # never be shrunk by market mood.
+        if decision == "EXECUTE" and action == "BUY":
+            try:
+                market_sentiment = await sentiment_mod.get_market_sentiment()
+                dampener = sentiment_mod.size_dampener(market_sentiment)
+                if dampener < 1.0:
+                    size_multiplier *= dampener
+                    fg = market_sentiment["fear_greed"]
+                    reasoning += (
+                        f" Fear & Greed at {fg['value']} ({fg['classification']}) — "
+                        f"entry size damped to {dampener:.0%}."
+                    )
+            except Exception:
+                logger.exception("Sentiment lookup failed; sizing without it")
+
         if decision != "EXECUTE":
             confidence = min(confidence, 0.45)
 
-        if settings.openai_api_key and strategy != "Native_TA_AI":
+        if settings.anthropic_api_key and strategy != "Native_TA_AI":
             reasoning = await self._refine_with_llm(signal_data, decision, reasoning)
 
         return {
@@ -91,10 +112,11 @@ class AIEngine:
         }
 
     async def _refine_with_llm(self, signal_data: Dict[str, Any], decision: str, rule_based_reasoning: str) -> str:
-        """Best-effort LLM gloss on the rule-based reasoning. Never changes the decision."""
+        """Best-effort Claude gloss on the rule-based reasoning. Never changes the decision."""
         try:
-            import httpx
+            from app.market_analysis import _get_anthropic_client
 
+            client = _get_anthropic_client()
             prompt = (
                 "You are a risk-averse crypto trading assistant. A rule-based system already "
                 f"made the decision '{decision}' for this signal: {signal_data}. "
@@ -102,19 +124,13 @@ class AIEngine:
                 "Rewrite that reasoning in 1-2 concise, professional sentences for a trading "
                 "dashboard. Do not change the decision or suggest a different action."
             )
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                    json={
-                        "model": "gpt-4o-mini",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 120,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
+            response = await client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=160,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(block.text for block in response.content if block.type == "text").strip()
+            return text or rule_based_reasoning
         except Exception:
             return rule_based_reasoning
 

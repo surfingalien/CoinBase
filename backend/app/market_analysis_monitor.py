@@ -8,6 +8,7 @@ ANTHROPIC_API_KEY it still produces rule-based confluence signals, so
 TradingView webhooks are never the only signal source.
 """
 import asyncio
+import time
 import uuid
 
 from loguru import logger
@@ -19,13 +20,24 @@ from app.trading import process_signal
 _task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
 
+# Per-symbol timestamp of the last emitted signal. A persistently bullish
+# chart would otherwise re-signal every poll cycle; the position-stacking
+# guard in trading.py would reject the duplicates anyway, but the cooldown
+# keeps the signal log meaningful and avoids wasted LLM calls.
+_last_signal_at: dict[str, float] = {}
+
 
 async def _poll_all_pairs() -> None:
+    cooldown_seconds = settings.signal_cooldown_minutes * 60
     for symbol in ALLOWED_PAIRS:
+        if time.monotonic() - _last_signal_at.get(symbol, -cooldown_seconds) < cooldown_seconds:
+            continue
+
         signal_data = await market_analysis.analyze_symbol(symbol)
         if signal_data is None:
             continue
 
+        _last_signal_at[symbol] = time.monotonic()
         signal_id = str(uuid.uuid4())
         logger.info(
             f"[Native_TA_AI] {symbol}: {signal_data['action']} "

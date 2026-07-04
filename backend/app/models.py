@@ -66,3 +66,11 @@ class Position(Base):
     # STOP_LOSS_PCT percentages.
     take_profit_price = Column(Float, nullable=True)
     stop_loss_price = Column(Float, nullable=True)
+
+    # Highest price seen while the position has been open — drives the
+    # trailing stop. Realized P&L and the exit reason are recorded at close
+    # so stats and the daily loss limit work from real numbers, not the
+    # last cached mark.
+    peak_price = Column(Float, nullable=True)
+    realized_pnl = Column(Float, nullable=True)
+    exit_reason = Column(String, nullable=True)  # take_profit, stop_loss, trailing_stop, sell_signal

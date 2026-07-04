@@ -1,11 +1,12 @@
 """Native technical + AI analysis engine.
 
-Replaces the earlier "call FinSurfing over HTTP" approach: this computes the
-same style of technical indicators directly against Coinbase's own public
-candle data (market_data.py + technical_indicators.py), then either asks
-Claude to turn them into a structured trading signal (if ANTHROPIC_API_KEY is
-set) or falls back to a pure rule-based confluence score. No external app,
-no token to manage.
+Computes technical indicators directly against Coinbase's own public candle
+data (market_data.py + technical_indicators.py) on two timeframes — the
+trading timeframe plus a higher timeframe for trend confirmation — folds in
+market sentiment and news headlines (sentiment.py), then either asks Claude
+to turn the whole picture into a structured trading signal (if
+ANTHROPIC_API_KEY is set) or falls back to a pure rule-based confluence
+score. No external app, no token to manage.
 """
 import json
 import re
@@ -13,11 +14,15 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from app import market_data, technical_indicators as ta
+from app import market_data, sentiment as sentiment_mod, technical_indicators as ta
 from app.config import settings
 
-# Anthropic SDK is optional — only imported when a key is configured, so the
-# rest of the app works without the `anthropic` package installed.
+# 6-hour candles for trend confirmation above the (default 1h) trading timeframe.
+HIGHER_TIMEFRAME_SECONDS = 21600
+
+# AsyncAnthropic so LLM calls never block the event loop (webhooks and the
+# position monitor keep running during analysis). Lazily constructed — the
+# `anthropic` package is only needed when a key is configured.
 _anthropic_client = None
 
 
@@ -26,11 +31,28 @@ def _get_anthropic_client():
     if _anthropic_client is None:
         import anthropic
 
-        _anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _anthropic_client
 
 
-def _build_prompt(symbol: str, price: float, ind: Dict[str, Any]) -> str:
+def _higher_timeframe_trend(candles: Optional[Dict[str, List[float]]]) -> Optional[str]:
+    if not candles or len(candles["closes"]) < 50:
+        return None
+    closes = candles["closes"]
+    ema50 = ta.compute_ema(closes, 50)
+    macd = ta.compute_macd(closes)
+    price = closes[-1]
+    if ema50 is None or macd is None:
+        return None
+    if price > ema50 and macd["trend"] == "bullish":
+        return "bullish"
+    if price < ema50 and macd["trend"] == "bearish":
+        return "bearish"
+    return "neutral"
+
+
+def _build_prompt(symbol: str, price: float, ind: Dict[str, Any],
+                  htf_trend: Optional[str], sentiment_block: str) -> str:
     macd = ind.get("macd") or {}
     bb = ind.get("bb") or {}
     sr = ind.get("sr") or {}
@@ -38,13 +60,13 @@ def _build_prompt(symbol: str, price: float, ind: Dict[str, Any]) -> str:
     obv = ind.get("obv") or {}
 
     return f"""You are an expert quantitative crypto trading analyst. Analyze the
-following technical data for {symbol} and produce a structured trading signal.
+following data for {symbol} and produce a structured trading signal.
 
 MARKET DATA:
 - Symbol: {symbol}
 - Current price: {price}
 
-TECHNICAL INDICATORS:
+TECHNICAL INDICATORS (trading timeframe):
 - RSI(14): {ind.get('rsi')}
 - MACD(12,26,9): {macd}
 - EMAs: 9={ind.get('ema9')} 21={ind.get('ema21')} 50={ind.get('ema50')} 200={ind.get('ema200')}
@@ -56,13 +78,18 @@ TECHNICAL INDICATORS:
 - Support/Resistance: {sr}
 - ADX(14): {ind.get('adx')}
 
+HIGHER TIMEFRAME (6h) TREND: {htf_trend or 'unavailable'}
+
 VOLUME: {vol}
 DETECTED PATTERNS: {', '.join(ind.get('patterns') or []) or 'none'}
-
+{sentiment_block}
 INSTRUCTIONS:
 1. Look for contradictions between indicators before concluding.
-2. Confidence should reflect indicator confluence (4+ agreeing = high confidence).
-3. Base stopLoss/takeProfit on ATR and support/resistance, not arbitrary percentages.
+2. Weigh the higher-timeframe trend heavily: counter-trend entries need much stronger evidence.
+3. Factor the market sentiment and news into your confidence — a technically
+   perfect setup during panic-driven news deserves lower confidence.
+4. Confidence should reflect confluence (4+ indicators agreeing = high confidence).
+5. Base stopLoss/takeProfit on ATR and support/resistance, not arbitrary percentages.
 
 Respond with ONLY pure JSON, no markdown fences, matching exactly:
 {{
@@ -70,15 +97,16 @@ Respond with ONLY pure JSON, no markdown fences, matching exactly:
   "confidence": 0-100,
   "stopLoss": number,
   "takeProfit": number,
-  "reasoning": "2-3 sentence explanation weighing bull and bear cases"
+  "reasoning": "2-3 sentence explanation weighing bull case, bear case, and market context"
 }}"""
 
 
-async def _analyze_with_claude(symbol: str, price: float, ind: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def _analyze_with_claude(symbol: str, price: float, ind: Dict[str, Any],
+                               htf_trend: Optional[str], sentiment_block: str) -> Optional[Dict[str, Any]]:
     try:
         client = _get_anthropic_client()
-        prompt = _build_prompt(symbol, price, ind)
-        response = client.messages.create(
+        prompt = _build_prompt(symbol, price, ind, htf_trend, sentiment_block)
+        response = await client.messages.create(
             model=settings.anthropic_model,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
@@ -91,8 +119,10 @@ async def _analyze_with_claude(symbol: str, price: float, ind: Dict[str, Any]) -
         return None
 
 
-def _analyze_with_rules(price: float, ind: Dict[str, Any]) -> Dict[str, Any]:
-    """Confluence scoring: count bullish vs bearish indicator votes."""
+def _analyze_with_rules(price: float, ind: Dict[str, Any],
+                        htf_trend: Optional[str]) -> Dict[str, Any]:
+    """Confluence scoring: count bullish vs bearish indicator votes, then
+    adjust for higher-timeframe agreement."""
     bullish = bearish = 0
     rsi = ind.get("rsi")
     if rsi is not None:
@@ -108,11 +138,11 @@ def _analyze_with_rules(price: float, ind: Dict[str, Any]) -> Dict[str, Any]:
         else:
             bearish += 1
 
-    ema50, ema200, price_now = ind.get("ema50"), ind.get("ema200"), price
+    ema50, ema200 = ind.get("ema50"), ind.get("ema200")
     if ema50 and ema200:
-        if price_now > ema50 > ema200:
+        if price > ema50 > ema200:
             bullish += 1
-        elif price_now < ema50 < ema200:
+        elif price < ema50 < ema200:
             bearish += 1
 
     bb = ind.get("bb")
@@ -122,7 +152,6 @@ def _analyze_with_rules(price: float, ind: Dict[str, Any]) -> Dict[str, Any]:
         elif bb["position"] == "upper":
             bearish += 1
 
-    vol = ind.get("volume")
     patterns: List[str] = ind.get("patterns") or []
     bullish_patterns = {"strong_uptrend", "golden_cross", "bullish_engulfing", "20bar_breakout_up", "hammer"}
     bearish_patterns = {"strong_downtrend", "death_cross", "bearish_engulfing", "20bar_breakout_down", "shooting_star"}
@@ -142,12 +171,22 @@ def _analyze_with_rules(price: float, ind: Dict[str, Any]) -> Dict[str, Any]:
         signal, confidence = "HOLD", 40
         stop_loss = take_profit = None
 
+    htf_note = ""
+    if signal != "HOLD" and htf_trend:
+        aligned = (signal == "BUY" and htf_trend == "bullish") or (signal == "SELL" and htf_trend == "bearish")
+        if aligned:
+            confidence = min(95, confidence + 8)
+            htf_note = f" 6h trend agrees ({htf_trend})."
+        elif htf_trend != "neutral":
+            confidence = max(0, confidence - 15)
+            htf_note = f" Counter to 6h trend ({htf_trend}) — confidence reduced."
+
     return {
         "signal": signal,
         "confidence": confidence,
         "stopLoss": stop_loss,
         "takeProfit": take_profit,
-        "reasoning": f"Rule-based confluence: {bullish} bullish vs {bearish} bearish indicators (net {net:+d}).",
+        "reasoning": f"Rule-based confluence: {bullish} bullish vs {bearish} bearish indicators (net {net:+d}).{htf_note}",
     }
 
 
@@ -161,11 +200,17 @@ async def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     price = candles["closes"][-1]
     indicators = ta.compute_all(**candles)
 
+    htf_candles = await market_data.fetch_candles(symbol, HIGHER_TIMEFRAME_SECONDS)
+    htf_trend = _higher_timeframe_trend(htf_candles)
+
+    market_sentiment = await sentiment_mod.get_market_sentiment()
+    sentiment_block = sentiment_mod.prompt_section(market_sentiment)
+
     analysis = None
     if settings.anthropic_api_key:
-        analysis = await _analyze_with_claude(symbol, price, indicators)
+        analysis = await _analyze_with_claude(symbol, price, indicators, htf_trend, sentiment_block)
     if analysis is None:
-        analysis = _analyze_with_rules(price, indicators)
+        analysis = _analyze_with_rules(price, indicators, htf_trend)
 
     action = analysis.get("signal")
     if action not in ("BUY", "SELL"):

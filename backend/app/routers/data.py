@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from sqlalchemy import select
 
+from app import sentiment as sentiment_mod
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
@@ -30,6 +31,9 @@ async def get_portfolio():
                 "size": p.size,
                 "entry_price": p.entry_price,
                 "current_price": current_price,
+                "peak_price": p.peak_price,
+                "take_profit_price": p.take_profit_price,
+                "stop_loss_price": p.stop_loss_price,
                 "unrealized_pnl": unrealized_pnl,
             })
 
@@ -94,22 +98,34 @@ async def get_stats():
         positions = (await session.execute(select(Position))).scalars().all()
 
         exchange = get_exchange()
-        total_pnl = 0.0
+        closed = [p for p in positions if p.status == "closed"]
+        realized_pnl = sum(p.realized_pnl or 0.0 for p in closed)
+
+        unrealized_pnl = 0.0
         for p in positions:
-            current_price = await exchange.get_price(p.symbol)
-            total_pnl += (current_price - p.entry_price) * p.size
+            if p.status == "open":
+                current_price = await exchange.get_price(p.symbol)
+                unrealized_pnl += (current_price - p.entry_price) * p.size
+
+        wins = sum(1 for p in closed if (p.realized_pnl or 0.0) > 0)
+        win_rate = (wins / len(closed) * 100) if closed else 0.0
 
         executed = [s for s in signals if s.status == "executed"]
-        win_rate = 0.0
-        if positions:
-            closed = [p for p in positions if p.status == "closed"]
-            wins = sum(1 for p in closed if p.current_price > p.entry_price)
-            win_rate = (wins / len(closed) * 100) if closed else 0.0
 
         return {
-            "total_pnl": total_pnl,
+            "total_pnl": realized_pnl + unrealized_pnl,
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
             "win_rate": round(win_rate, 1),
             "total_trades": len(orders),
+            "closed_positions": len(closed),
             "total_signals": len(signals),
             "executed_signals": len(executed),
         }
+
+
+@router.get("/sentiment")
+async def get_sentiment():
+    """Current market sentiment snapshot: Fear & Greed index + headlines."""
+    data = await sentiment_mod.get_market_sentiment()
+    return data or {"fear_greed": None, "headlines": [], "disabled": True}
