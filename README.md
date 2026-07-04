@@ -129,18 +129,47 @@ This runs unconditionally — there's nothing to deploy separately and nothing
 to authenticate against. Leave `ANTHROPIC_API_KEY` blank to run purely on the
 rule-based fallback.
 
+## Deploying (Railway)
+
+The bot runs two long-lived background loops (`position_monitor.py`,
+`market_analysis_monitor.py`) inside the FastAPI process — it needs a host
+that keeps one process running continuously, not a serverless/functions
+platform that spins down between requests.
+
+1. On [Railway](https://railway.app), create a new project from this GitHub repo.
+2. Railway detects `railway.json` at the repo root, which points it at
+   `backend/Dockerfile` — no other build config needed.
+3. In the project's **Variables** tab, set every value from
+   `backend/.env.example` (at minimum `WEBHOOK_SECRET`; add
+   `COINBASE_API_KEY`/`COINBASE_API_SECRET` and flip
+   `LIVE_TRADING_ENABLED=true` only once you're ready to go live).
+4. Deploy. Railway assigns a public URL — use `https://<that-url>/webhook/tradingview`
+   as the webhook URL in your TradingView alerts.
+5. **Persistence matters for a trading bot.** The default SQLite file lives
+   on the container's ephemeral disk, which can reset on redeploy. Either
+   attach a Railway volume mounted where `trading.db` lives, or switch
+   `DATABASE_URL` to a Railway Postgres add-on before running with real money.
+
+For the frontend dashboard, deploy `frontend/` as a second Railway service
+(or any static host) and point its `vite.config.ts` proxy / API base URL at
+the backend service's public URL instead of `localhost:8000`.
+
 ## Going live on Coinbase
 
 1. Create an Advanced Trade API key at
-   https://www.coinbase.com/settings/api with trade permissions.
-2. Set `COINBASE_API_KEY`, `COINBASE_API_SECRET`, and
-   `LIVE_TRADING_ENABLED=true` in `backend/.env`.
-3. Restart the backend. `get_exchange()` in `app/exchange.py` will now route
-   orders through `CoinbaseExchange` instead of the paper simulator, and every
-   order/portfolio call touches your real Coinbase account.
-
-**Do this only after you've reviewed the signal history in paper mode** and
-are comfortable with the strategies' behavior.
+   https://www.coinbase.com/settings/api. Grant **View + Trade** permissions
+   only — explicitly leave **Transfer/Withdraw** unchecked, so a leaked key
+   can never move funds out of the account, only trade within it. Add an IP
+   allow-list restricted to your host's address if Coinbase offers one.
+2. Set `COINBASE_API_KEY` (the key name) and `COINBASE_API_SECRET` (the
+   private key Coinbase shows you once) as environment variables on your
+   host — never commit them to the repo.
+3. Leave `LIVE_TRADING_ENABLED=false` first and watch `GET /api/signals` and
+   `GET /api/orders` in paper mode until you trust the strategies' behavior.
+4. When ready, set `LIVE_TRADING_ENABLED=true` and restart. `get_exchange()`
+   in `app/exchange.py` will now route orders through `CoinbaseExchange`
+   instead of the paper simulator, and every order/portfolio call touches
+   your real Coinbase account.
 
 ## Automatic profit booking & stop-loss
 
