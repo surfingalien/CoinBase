@@ -60,16 +60,16 @@ class AIEngine:
                 reasoning = "MACD histogram flipped positive in trend direction — short-duration momentum scalp."
                 size_multiplier = 0.5
 
-        elif strategy == "FinSurfing_AI":
-            # FinSurfing already ran a full technical + Claude analysis upstream
-            # (RSI/MACD/EMA/BB/ATR/ADX/S&R/patterns -> structured signal), so its
-            # own confidence is the gate here rather than a local indicator re-check.
-            fs_confidence = float(signal_data.get("finsurfing_confidence", 0.0))
-            if fs_confidence >= settings.finsurfing_min_confidence:
-                decision, confidence = "EXECUTE", fs_confidence
-                reasoning = signal_data.get("finsurfing_reasoning") or "FinSurfing AI analysis confirmed the signal."
+        elif strategy == "Native_TA_AI":
+            # market_analysis.py already ran the full technical (+ optional
+            # Claude) analysis upstream, so its own confidence is the gate
+            # here rather than a second indicator re-check.
+            ta_confidence = float(signal_data.get("ta_confidence", 0.0))
+            if ta_confidence >= settings.market_analysis_min_confidence:
+                decision, confidence = "EXECUTE", ta_confidence
+                reasoning = signal_data.get("ta_reasoning") or "Native technical analysis confirmed the signal."
             else:
-                reasoning = f"FinSurfing confidence ({fs_confidence:.0%}) below the {settings.finsurfing_min_confidence:.0%} execution threshold."
+                reasoning = f"Analysis confidence ({ta_confidence:.0%}) below the {settings.market_analysis_min_confidence:.0%} execution threshold."
 
         # Volatile alts get a smaller slice of capital regardless of strategy.
         if decision == "EXECUTE" and risk_weight > 1.0:
@@ -79,7 +79,7 @@ class AIEngine:
         if decision != "EXECUTE":
             confidence = min(confidence, 0.45)
 
-        if settings.openai_api_key and strategy != "FinSurfing_AI":
+        if settings.openai_api_key and strategy != "Native_TA_AI":
             reasoning = await self._refine_with_llm(signal_data, decision, reasoning)
 
         return {

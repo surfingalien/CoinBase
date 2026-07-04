@@ -4,7 +4,7 @@ An end-to-end system that turns TradingView technical signals into risk-managed,
 AI-reviewed trades on Coinbase, plus a live dashboard and a marketing landing page.
 
 ```
-TradingView (Pine Script strategies)     FinSurfing (TradingView charts + Claude analysis)
+TradingView (Pine Script strategies)     Coinbase public candles (native technical + AI analysis)
         │  webhook (JSON + shared secret)         │  polled every N minutes
         ▼                                         ▼
               FastAPI backend
@@ -13,7 +13,10 @@ TradingView (Pine Script strategies)     FinSurfing (TradingView charts + Claude
   ├─ exchange.py     → MockExchange (paper) or CoinbaseExchange (live, opt-in)
   ├─ trading.py       → orchestrates signal → decision → order → position
   ├─ position_monitor.py → watches open positions, auto-sells at take-profit / stop-loss
-  └─ finsurfing_monitor.py → polls FinSurfing's AI analysis as an extra signal source
+  ├─ technical_indicators.py → RSI/MACD/EMA/BB/ATR/ADX/S&R/pattern math
+  ├─ market_data.py → fetches OHLCV candles from Coinbase's public API
+  ├─ market_analysis.py → turns indicators into a signal (Claude, or rule-based fallback)
+  └─ market_analysis_monitor.py → polls market_analysis.py for every pair
         │
         ▼
 SQLite (signals, orders, positions)
@@ -39,8 +42,10 @@ backend/         FastAPI app (paper + live trading engine)
     risk.py         position sizing and hard risk caps
     trading.py      the webhook → decision → order pipeline
     position_monitor.py  background loop: auto take-profit / stop-loss exits
-    finsurfing_client.py   calls FinSurfing's AI analysis endpoint
-    finsurfing_monitor.py  background loop: polls FinSurfing for every pair
+    technical_indicators.py  RSI/MACD/EMA/BB/ATR/ADX/support-resistance/pattern math
+    market_data.py         fetches OHLCV candles from Coinbase's public API
+    market_analysis.py     turns indicators into a signal (Claude, or rule-based fallback)
+    market_analysis_monitor.py  background loop: analyzes every pair on a schedule
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats
@@ -94,37 +99,35 @@ backend on port 8000.
 4. Repeat per pair/timeframe. The backend accepts alerts from all five
    strategies concurrently — `ai_engine.py` routes each by its `strategy` field.
 
-## Connecting FinSurfing (optional second signal source)
+## Native technical + AI analysis (optional second signal source)
 
-[FinSurfing](https://github.com/surfingalien/finsurfing) is a separate app
-that embeds TradingView's own chart widget and runs a Claude-based technical
-analysis engine (RSI/MACD/EMA/Bollinger/ATR/ADX/support-resistance/pattern
-detection) to produce a structured BUY/SELL/HOLD signal with its own
-confidence, stop-loss, and take-profit. GainzAI can poll it as an additional,
-independent signal source alongside (not instead of) the TradingView
-webhooks — useful since it reasons over live charts on a schedule rather than
-waiting for a Pine Script condition to fire.
+Alongside the TradingView webhooks, GainzAI runs its own analysis loop —
+`market_analysis_monitor.py` — that needs no external app and no API token:
 
-1. Deploy FinSurfing (it runs as its own Node/Express app) and note its public URL.
-2. Generate an API token: FinSurfing's `/api/trading-analysis/analyze` route
-   requires a JWT signed with FinSurfing's `JWT_SECRET`. The simplest path is
-   to log in to FinSurfing normally and copy your access token; for a
-   long-running bot you'll want a dedicated service-account token instead so
-   it doesn't expire with your session.
-3. In `backend/.env`, set `FINSURFING_BASE_URL` (FinSurfing's URL) and
-   `FINSURFING_API_TOKEN` (the JWT from step 2). Leave both blank to disable
-   this integration entirely — everything else works the same without it.
-4. Restart the backend. `finsurfing_monitor.py` will poll every pair in
-   `ALLOWED_PAIRS` every `FINSURFING_POLL_INTERVAL_SECONDS` (default 15
-   minutes — each call triggers an LLM analysis on FinSurfing's side, so
-   don't set this too aggressively), feeding BUY/SELL calls through the same
-   `ai_engine.py` → `risk.py` → `exchange.py` pipeline as everything else,
-   tagged with `strategy: "FinSurfing_AI"`.
-5. When FinSurfing supplies its own stop-loss/take-profit for a position,
-   `position_monitor.py` uses those exact price levels instead of the global
-   `TAKE_PROFIT_PCT`/`STOP_LOSS_PCT` percentages — FinSurfing's levels are
-   ATR-based per symbol, which is more precise than one fixed percentage
-   applied to every asset.
+1. `market_data.py` pulls OHLCV candles straight from Coinbase's public
+   market data endpoint (no auth required) for every pair in `ALLOWED_PAIRS`.
+2. `technical_indicators.py` computes RSI, MACD, EMAs, Bollinger Bands, ATR,
+   StochRSI, VWAP, OBV, support/resistance, ADX, and candlestick/breakout
+   patterns from those candles — the same style of technical analysis a
+   TradingView chart would show.
+3. `market_analysis.py` turns that into a BUY/SELL/HOLD call. If
+   `ANTHROPIC_API_KEY` is set, it asks Claude to weigh the indicators and
+   write the reasoning; if not, it falls back to a pure rule-based confluence
+   score (counts bullish vs. bearish indicators, requires several to agree).
+   Either way it works out of the box — the Claude key only upgrades the
+   reasoning quality, it isn't required.
+4. The resulting signals feed through the same `ai_engine.py` → `risk.py` →
+   `exchange.py` pipeline as the Pine Script webhooks, tagged with
+   `strategy: "Native_TA_AI"`, on a schedule set by
+   `MARKET_ANALYSIS_POLL_INTERVAL_SECONDS` (default 15 minutes — each Claude
+   call costs money, so don't set this too aggressively if a key is configured).
+5. When this analysis supplies its own ATR-based stop-loss/take-profit for a
+   position, `position_monitor.py` uses those exact price levels instead of
+   the global `TAKE_PROFIT_PCT`/`STOP_LOSS_PCT` percentages.
+
+This runs unconditionally — there's nothing to deploy separately and nothing
+to authenticate against. Leave `ANTHROPIC_API_KEY` blank to run purely on the
+rule-based fallback.
 
 ## Going live on Coinbase
 

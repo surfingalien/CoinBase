@@ -8,5 +8,4 @@ httpx==0.26.0
 python-dotenv==1.0.1
 loguru==0.7.2
 coinbase-advanced-py==1.2.2
-PyJWT==2.8.0
-cryptography==42.0.5
+anthropic==0.40.0

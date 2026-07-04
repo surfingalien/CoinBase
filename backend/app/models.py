@@ -61,7 +61,8 @@ class Position(Base):
     closed_at = Column(DateTime, nullable=True)
 
     # Absolute exit prices, set when the originating signal supplied its own
-    # (e.g. FinSurfing's AI analysis). When null, the position monitor falls
-    # back to the global TAKE_PROFIT_PCT / STOP_LOSS_PCT percentages.
+    # (e.g. the native technical analysis engine's ATR-based levels). When
+    # null, the position monitor falls back to the global TAKE_PROFIT_PCT /
+    # STOP_LOSS_PCT percentages.
     take_profit_price = Column(Float, nullable=True)
     stop_loss_price = Column(Float, nullable=True)
