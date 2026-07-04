@@ -1,0 +1,30 @@
+//@version=5
+// VWAP Bounce Bot — Intraday Support
+// Buys pullbacks to VWAP during an established EMA uptrend, confirmed by volume.
+strategy("VWAP Bounce Bot", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=3)
+
+emaTrendLen = input.int(50, "EMA Trend Filter")
+volLen      = input.int(20, "Volume SMA Length")
+webhookSec  = input.string("change_me_to_a_long_random_string", "Webhook Secret", group="Webhook")
+
+vwapVal   = ta.vwap(hlc3)
+emaFast   = ta.ema(close, 9)
+emaTrend  = ta.ema(close, emaTrendLen)
+volSma    = ta.sma(volume, volLen)
+volRatio  = volume / volSma
+
+uptrend  = close > emaTrend
+touchedVwap = low <= vwapVal and close > vwapVal
+buyCond  = uptrend and touchedVwap and volRatio >= 1.2
+
+payload(action) =>
+    '{"webhook_secret":"' + webhookSec + '","strategy":"VWAP_Bounce_Bot","symbol":"' + syminfo.ticker +
+     '-USD","action":"' + action + '","price":' + str.tostring(close) + ',"vwap":' + str.tostring(vwapVal) +
+     ',"volume_ratio":' + str.tostring(volRatio) + ',"ema_trend":' + str.tostring(emaTrend) + '}'
+
+if buyCond
+    alert(payload("BUY"), alert.freq_once_per_bar_close)
+
+plot(vwapVal, color=color.purple, title="VWAP")
+plot(emaTrend, color=color.orange, title="EMA Trend")
+plotshape(buyCond, title="Buy", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)

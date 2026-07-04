@@ -1,0 +1,37 @@
+//@version=5
+// Mean Reversion Master — Range Trading
+// Bollinger Bands + RSI + Stochastic oversold bounce.
+strategy("Mean Reversion Master", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=3)
+
+bbLen      = input.int(20, "BB Length")
+bbMult     = input.float(2.0, "BB StdDev")
+rsiLen     = input.int(14, "RSI Length")
+stochLen   = input.int(14, "Stochastic Length")
+webhookSec = input.string("change_me_to_a_long_random_string", "Webhook Secret", group="Webhook")
+
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+upper = basis + dev
+lower = basis - dev
+rsiVal = ta.rsi(close, rsiLen)
+stochK = ta.stoch(close, high, low, stochLen)
+
+buyCond  = close < lower and rsiVal < 30 and stochK < 20
+sellCond = close > upper and rsiVal > 70 and stochK > 80
+
+payload(action) =>
+    '{"webhook_secret":"' + webhookSec + '","strategy":"Mean_Reversion_Master","symbol":"' + syminfo.ticker +
+     '-USD","action":"' + action + '","price":' + str.tostring(close) + ',"rsi":' + str.tostring(rsiVal) +
+     ',"stoch_k":' + str.tostring(stochK) + ',"bb_lower":' + str.tostring(lower) +
+     ',"bb_upper":' + str.tostring(upper) + '}'
+
+if buyCond
+    alert(payload("BUY"), alert.freq_once_per_bar_close)
+if sellCond
+    alert(payload("SELL"), alert.freq_once_per_bar_close)
+
+plot(upper, color=color.gray, title="BB Upper")
+plot(basis, color=color.blue, title="BB Basis")
+plot(lower, color=color.gray, title="BB Lower")
+plotshape(buyCond, title="Buy", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sellCond, title="Sell", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)

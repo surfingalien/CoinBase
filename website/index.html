@@ -1,0 +1,524 @@
+<title>GainzAI — Disciplined Autonomous Crypto Trading</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg:#0b0e11;
+    --surface:#12161b;
+    --surface-2:#171c22;
+    --line:#262c33;
+    --ink:#e9ebe7;
+    --muted:#8b9199;
+    --faint:#5c636c;
+    --accent:#b98a3a;
+    --accent-soft:#b98a3a22;
+    --gain:#5c9c86;
+    --loss:#b3503f;
+    --serif: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    --sans: -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  :root[data-theme="light"]{
+    --bg:#f5f3ee;
+    --surface:#ffffff;
+    --surface-2:#eeece5;
+    --line:#ddd8cc;
+    --ink:#1c1c1a;
+    --muted:#5c5b55;
+    --faint:#8a8880;
+    --accent:#96702a;
+    --accent-soft:#96702a1a;
+    --gain:#3f7a63;
+    --loss:#9a4433;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f5f3ee;
+      --surface:#ffffff;
+      --surface-2:#eeece5;
+      --line:#ddd8cc;
+      --ink:#1c1c1a;
+      --muted:#5c5b55;
+      --faint:#8a8880;
+      --accent:#96702a;
+      --accent-soft:#96702a1a;
+      --gain:#3f7a63;
+      --loss:#9a4433;
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  a{color:inherit;}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 32px;}
+  h1,h2,h3{font-family:var(--serif);font-weight:400;text-wrap:balance;margin:0;}
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:11.5px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--accent);
+  }
+  .num{font-variant-numeric:tabular-nums;font-family:var(--mono);}
+
+  /* ---------- Nav ---------- */
+  nav{
+    position:sticky;top:0;z-index:40;
+    background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+  }
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:68px;}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--serif);font-size:19px;letter-spacing:.01em;}
+  .brand .mark{
+    width:26px;height:26px;border:1px solid var(--accent);border-radius:2px;
+    display:flex;align-items:center;justify-content:center;color:var(--accent);
+    font-family:var(--mono);font-size:12px;
+  }
+  .navlinks{display:flex;gap:36px;font-size:14px;color:var(--muted);}
+  .navlinks a{text-decoration:none;transition:color .15s;}
+  .navlinks a:hover{color:var(--ink);}
+  .cta{
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.04em;
+    border:1px solid var(--accent);color:var(--accent);
+    padding:9px 18px;border-radius:2px;text-decoration:none;
+    transition:background .15s,color .15s;white-space:nowrap;
+  }
+  .cta:hover{background:var(--accent);color:var(--bg);}
+  .cta.solid{background:var(--accent);color:var(--bg);}
+  .cta.solid:hover{opacity:.88;background:var(--accent);}
+
+  /* ---------- Hero ---------- */
+  .hero{
+    border-bottom:1px solid var(--line);
+    background:
+      radial-gradient(ellipse 900px 500px at 80% -10%, var(--accent-soft), transparent 60%);
+  }
+  .hero-inner{
+    padding:96px 0 64px;
+    display:grid;grid-template-columns:1.15fr .85fr;gap:64px;align-items:center;
+  }
+  .hero h1{font-size:56px;line-height:1.06;letter-spacing:-.01em;}
+  .hero h1 em{font-style:italic;color:var(--accent);}
+  .hero p.lede{font-size:17.5px;line-height:1.65;color:var(--muted);max-width:46ch;margin:26px 0 34px;}
+  .hero-cta{display:flex;gap:14px;align-items:center;}
+  .hero-note{margin-top:18px;font-size:12.5px;color:var(--faint);}
+
+  .ticker-card{
+    background:var(--surface);border:1px solid var(--line);border-radius:4px;
+    overflow:hidden;
+  }
+  .ticker-head{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:14px 18px;border-bottom:1px solid var(--line);
+  }
+  .ticker-head .dot{width:6px;height:6px;border-radius:50%;background:var(--gain);display:inline-block;margin-right:7px;box-shadow:0 0 0 3px color-mix(in srgb, var(--gain) 20%, transparent);}
+  canvas#spark{display:block;width:100%;height:120px;}
+  .ticker-rows{padding:6px 0;}
+  .ticker-row{
+    display:grid;grid-template-columns:1.1fr .9fr .9fr 1fr;gap:8px;
+    padding:11px 18px;font-family:var(--mono);font-size:12.5px;
+    border-top:1px solid var(--line);
+  }
+  .ticker-row:first-child{border-top:none;}
+  .ticker-row .sym{color:var(--ink);}
+  .ticker-row .g{color:var(--gain);}
+  .ticker-row .l{color:var(--loss);}
+  .ticker-row .strat{color:var(--faint);text-align:right;}
+
+  /* ---------- Trust bar ---------- */
+  .trustbar{border-bottom:1px solid var(--line);background:var(--surface-2);}
+  .trustbar .wrap{
+    display:flex;justify-content:space-between;padding:22px 32px;
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;color:var(--faint);
+    flex-wrap:wrap;gap:10px 28px;
+  }
+
+  /* ---------- Section shell ---------- */
+  section{padding:100px 0;border-bottom:1px solid var(--line);}
+  .head-row{display:flex;justify-content:space-between;align-items:flex-end;gap:40px;margin-bottom:56px;}
+  .head-row h2{font-size:36px;}
+  .head-row p{color:var(--muted);max-width:38ch;font-size:15px;line-height:1.6;}
+
+  /* ---------- Pipeline (real sequence -> numbered) ---------- */
+  .pipeline{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);}
+  .pstep{background:var(--bg);padding:36px 32px;}
+  .pstep .idx{font-family:var(--mono);color:var(--accent);font-size:13px;}
+  .pstep h3{font-size:21px;margin:18px 0 12px;}
+  .pstep p{color:var(--muted);font-size:14.5px;line-height:1.65;margin:0;}
+  .pstep .tag{
+    display:inline-block;margin-top:18px;font-family:var(--mono);font-size:11px;
+    color:var(--faint);border:1px solid var(--line);padding:4px 9px;border-radius:2px;
+  }
+
+  /* ---------- Strategy grid ---------- */
+  .strategies{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);}
+  .strat-card{background:var(--surface);padding:30px;}
+  .strat-card h3{font-size:19px;margin-bottom:4px;}
+  .strat-card .kind{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.05em;text-transform:uppercase;}
+  .strat-card p{color:var(--muted);font-size:13.5px;line-height:1.6;margin:14px 0 18px;}
+  .strat-meta{display:flex;gap:18px;font-family:var(--mono);font-size:11.5px;color:var(--faint);border-top:1px solid var(--line);padding-top:14px;}
+  .strat-meta b{color:var(--ink);font-weight:500;}
+
+  /* ---------- Risk / trust section ---------- */
+  .risk{display:grid;grid-template-columns:.9fr 1.1fr;gap:72px;align-items:start;}
+  .risk-list{display:flex;flex-direction:column;gap:0;}
+  .risk-item{display:grid;grid-template-columns:28px 1fr;gap:16px;padding:22px 0;border-top:1px solid var(--line);}
+  .risk-item:first-child{border-top:none;}
+  .risk-item .ck{color:var(--accent);font-family:var(--mono);}
+  .risk-item h4{margin:0 0 6px;font-size:15.5px;font-weight:600;font-family:var(--sans);}
+  .risk-item p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.6;}
+  .risk-panel{
+    background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:32px;
+  }
+  .risk-panel .eyebrow{margin-bottom:14px;display:block;}
+  .risk-panel p{color:var(--muted);font-size:14.5px;line-height:1.75;margin:0 0 16px;}
+  .risk-panel p:last-child{margin-bottom:0;}
+  .risk-panel strong{color:var(--ink);font-weight:600;}
+
+  /* ---------- Plans ---------- */
+  .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;}
+  .plan{border:1px solid var(--line);border-radius:4px;padding:34px 30px;background:var(--surface);display:flex;flex-direction:column;}
+  .plan.feature{border-color:var(--accent);position:relative;}
+  .plan.feature::before{
+    content:"Most deployed";position:absolute;top:-11px;left:30px;
+    background:var(--accent);color:var(--bg);font-family:var(--mono);font-size:10px;
+    letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:2px;
+  }
+  .plan h3{font-family:var(--sans);font-size:15px;font-weight:600;color:var(--muted);letter-spacing:.02em;text-transform:uppercase;margin-bottom:14px;}
+  .plan .price{font-family:var(--serif);font-size:38px;margin-bottom:4px;}
+  .plan .price span{font-family:var(--mono);font-size:13px;color:var(--faint);}
+  .plan ul{list-style:none;margin:24px 0 28px;padding:0;display:flex;flex-direction:column;gap:11px;}
+  .plan li{font-size:13.5px;color:var(--muted);display:flex;gap:9px;}
+  .plan li::before{content:"—";color:var(--accent);}
+  .plan .cta{text-align:center;margin-top:auto;}
+
+  /* ---------- Final CTA ---------- */
+  .final{
+    text-align:center;padding:120px 0;border-bottom:none;
+    background:radial-gradient(ellipse 700px 400px at 50% 100%, var(--accent-soft), transparent 65%);
+  }
+  .final h2{font-size:42px;max-width:16ch;margin:0 auto 20px;}
+  .final p{color:var(--muted);max-width:46ch;margin:0 auto 36px;font-size:15.5px;line-height:1.6;}
+
+  footer{padding:40px 0;}
+  footer .wrap{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--faint);flex-wrap:wrap;gap:12px;}
+  footer .fine{max-width:640px;color:var(--faint);}
+
+  @media (max-width:920px){
+    .hero-inner{grid-template-columns:1fr;}
+    .pipeline,.strategies{grid-template-columns:1fr;}
+    .risk{grid-template-columns:1fr;}
+    .plans{grid-template-columns:1fr;}
+    .navlinks{display:none;}
+    .hero h1{font-size:40px;}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important;transition:none !important;}
+  }
+</style>
+
+<nav>
+  <div class="wrap">
+    <div class="brand"><span class="mark">G</span>GainzAI</div>
+    <div class="navlinks">
+      <a href="#how">How it works</a>
+      <a href="#strategies">Strategies</a>
+      <a href="#risk">Risk controls</a>
+      <a href="#plans">Access</a>
+    </div>
+    <a class="cta solid" href="#plans">Request access</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div>
+      <span class="eyebrow">Autonomous Digital Asset Trading</span>
+      <h1 style="margin-top:18px;">Discipline, encoded.<br/><em>Never off-shift.</em></h1>
+      <p class="lede">GainzAI reads TradingView's own technical signals, runs them through an independent AI risk review, and executes on Coinbase within milliseconds — governed by the same position limits and daily loss caps, every single time, without fatigue or emotion.</p>
+      <div class="hero-cta">
+        <a class="cta solid" href="#plans">Request access</a>
+        <a class="cta" href="#how">See how it decides</a>
+      </div>
+      <p class="hero-note">Non-custodial · your Coinbase keys, your account · paper-trading mode by default</p>
+    </div>
+
+    <div class="ticker-card">
+      <div class="ticker-head">
+        <span class="eyebrow"><span class="dot"></span>Live signal feed</span>
+        <span class="num" style="font-size:12px;color:var(--faint);">24h</span>
+      </div>
+      <canvas id="spark"></canvas>
+      <div class="ticker-rows" id="rows"></div>
+    </div>
+  </div>
+</header>
+
+<div class="trustbar">
+  <div class="wrap">
+    <span>15 markets monitored</span>
+    <span>5 independent strategies</span>
+    <span>AI-gated execution</span>
+    <span>Hard daily loss ceiling</span>
+    <span>Full audit trail, every signal</span>
+  </div>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <div class="head-row">
+      <h2>Three checkpoints between<br/>an idea and an order.</h2>
+      <p>No signal reaches your capital without clearing all three. That sequence is the product.</p>
+    </div>
+    <div class="pipeline">
+      <div class="pstep">
+        <span class="idx">01</span>
+        <h3>Signal</h3>
+        <p>TradingView strategies — GainzAlgo V2 Alpha, Mean Reversion Master, Breakout Hunter, and others — compute their indicators bar-by-bar and post a signed webhook the moment a rule fires.</p>
+        <span class="tag">EMA · MACD · RSI · VWAP</span>
+      </div>
+      <div class="pstep">
+        <span class="idx">02</span>
+        <h3>AI judgment</h3>
+        <p>An independent decision engine re-checks the indicators against the strategy's own confirmation logic, scores confidence, and sizes the position — or rejects the signal outright.</p>
+        <span class="tag">Confidence-weighted sizing</span>
+      </div>
+      <div class="pstep">
+        <span class="idx">03</span>
+        <h3>Execution</h3>
+        <p>Approved orders route to Coinbase's Advanced Trade API within your own account. Every fill, rejection, and rationale is logged to a dashboard you can audit line by line.</p>
+        <span class="tag">Your keys · your custody</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="strategies">
+  <div class="wrap">
+    <div class="head-row">
+      <h2>Five strategies.<br/>One risk framework.</h2>
+      <p>Each strategy trades a different market condition, so the portfolio isn't betting on one regime.</p>
+    </div>
+    <div class="strategies">
+      <div class="strat-card">
+        <span class="kind">Trend · Momentum</span>
+        <h3>GainzAlgo V2 Alpha</h3>
+        <p>EMA 9/21/50 stack confluence with MACD cross and RSI filter. Trades with the prevailing trend only.</p>
+        <div class="strat-meta"><span>Confidence <b>0.85</b></span><span>Tier <b>1.0×</b></span></div>
+      </div>
+      <div class="strat-card">
+        <span class="kind">Range · Reversion</span>
+        <h3>Mean Reversion Master</h3>
+        <p>Bollinger Band pierce with RSI and Stochastic confirmation. Buys exhaustion, not momentum.</p>
+        <div class="strat-meta"><span>Confidence <b>0.75</b></span><span>Size <b>0.8×</b></span></div>
+      </div>
+      <div class="strat-card">
+        <span class="kind">Volatility</span>
+        <h3>Breakout Hunter</h3>
+        <p>Donchian channel breaks confirmed by a 1.5× volume surge. Sized up for genuine expansion.</p>
+        <div class="strat-meta"><span>Confidence <b>0.80</b></span><span>Size <b>1.2×</b></span></div>
+      </div>
+      <div class="strat-card">
+        <span class="kind">Intraday</span>
+        <h3>VWAP Bounce Bot</h3>
+        <p>Buys reclaims of VWAP from above during an established uptrend, gated by volume support.</p>
+        <div class="strat-meta"><span>Confidence <b>0.78</b></span><span>Tier <b>1.0×</b></span></div>
+      </div>
+      <div class="strat-card">
+        <span class="kind">Scalp</span>
+        <h3>Scalp Momentum</h3>
+        <p>MACD histogram flips filtered by a Choppiness Index gate — only fires in trending tape.</p>
+        <div class="strat-meta"><span>Confidence <b>0.70</b></span><span>Size <b>0.5×</b></span></div>
+      </div>
+      <div class="strat-card" style="display:flex;align-items:center;justify-content:center;">
+        <p style="margin:0;text-align:center;font-size:13px;">Bring your own Pine Script.<br/>The AI layer and risk engine sit under any strategy.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="risk">
+  <div class="wrap risk">
+    <div>
+      <span class="eyebrow">Why this doesn't blow up an account</span>
+      <h2 style="font-size:32px;margin:16px 0 40px;">Risk control is the<br/>feature, not the disclaimer.</h2>
+      <div class="risk-list">
+        <div class="risk-item"><span class="ck">→</span><div><h4>Per-trade caps</h4><p>No single order can exceed a fixed share of portfolio equity, regardless of how confident a signal is.</p></div></div>
+        <div class="risk-item"><span class="ck">→</span><div><h4>Daily loss ceiling</h4><p>Once a set drawdown threshold is hit in a session, new entries pause automatically until the next day.</p></div></div>
+        <div class="risk-item"><span class="ck">→</span><div><h4>Volatility-tiered sizing</h4><p>Blue-chip pairs get full allocation; volatile alt pairs are automatically sized down.</p></div></div>
+        <div class="risk-item"><span class="ck">→</span><div><h4>Paper mode by default</h4><p>Every deployment starts in simulation. Live trading is a deliberate, explicit opt-in.</p></div></div>
+      </div>
+    </div>
+    <div class="risk-panel">
+      <span class="eyebrow">A plain-language note</span>
+      <p><strong>This is a trading tool, not a promise of profit.</strong> Cryptocurrency markets are volatile and automated strategies can lose money, including in ways backtests don't anticipate.</p>
+      <p>GainzAI's job is to apply your rules and risk limits with more consistency than a human can manage under stress — not to eliminate market risk. You retain full custody of funds through your own Coinbase account, and can pause or disable trading at any time.</p>
+      <p>We recommend running in paper-trading mode until you've reviewed the signal history and are comfortable with how the system behaves.</p>
+    </div>
+  </div>
+</section>
+
+<section id="plans">
+  <div class="wrap">
+    <div class="head-row">
+      <h2>Access tiers</h2>
+      <p>Self-hosted on your own infrastructure and your own Coinbase account. No pooled funds, ever.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <h3>Paper Desk</h3>
+        <div class="price">Free<span> / self-hosted</span></div>
+        <ul>
+          <li>Full source, unlimited use</li>
+          <li>Paper-trading exchange included</li>
+          <li>Up to 3 concurrent strategies</li>
+          <li>Community support</li>
+        </ul>
+        <a class="cta" href="#">Clone the repository</a>
+      </div>
+      <div class="plan feature">
+        <h3>Live Desk</h3>
+        <div class="price">$149<span> / month</span></div>
+        <ul>
+          <li>Everything in Paper Desk</li>
+          <li>Live Coinbase execution</li>
+          <li>All 15 markets, 5 strategies</li>
+          <li>Daily loss-limit automation</li>
+          <li>Priority support</li>
+        </ul>
+        <a class="cta solid" href="#">Request access</a>
+      </div>
+      <div class="plan">
+        <h3>Managed Desk</h3>
+        <div class="price">Custom</div>
+        <ul>
+          <li>Everything in Live Desk</li>
+          <li>Custom strategy development</li>
+          <li>Dedicated infrastructure</li>
+          <li>Direct engineering line</li>
+        </ul>
+        <a class="cta" href="#">Talk to us</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="final" style="border-bottom:none;">
+  <div class="wrap">
+    <h2>Your strategy deserves<br/>an execution desk this precise.</h2>
+    <p>Start in paper mode today. Move to live capital only when the signal log has earned it.</p>
+    <a class="cta solid" href="#plans">Request access</a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="brand" style="font-size:15px;"><span class="mark" style="width:20px;height:20px;font-size:10px;">G</span>GainzAI</div>
+    <p class="fine">Not investment advice. Digital assets are volatile; automated strategies can lose money. Trading is executed directly on your own Coinbase account — GainzAI never holds custody of your funds.</p>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var rows = [
+      ["BTC-USD","+1.84%","64,512.30","GainzAlgo V2"],
+      ["SOL-USD","+3.12%","145.88","Breakout Hunter"],
+      ["ETH-USD","-0.42%","3,241.05","VWAP Bounce"],
+      ["LINK-USD","+2.05%","15.34","Mean Reversion"],
+      ["INJ-USD","-1.10%","24.71","Scalp Momentum"]
+    ];
+    var rowsEl = document.getElementById("rows");
+    rows.forEach(function(r){
+      var div = document.createElement("div");
+      div.className = "ticker-row";
+      var cls = r[1][0] === "+" ? "g" : "l";
+      div.innerHTML =
+        '<span class="sym">'+r[0]+'</span>' +
+        '<span class="'+cls+'">'+r[1]+'</span>' +
+        '<span class="num">'+r[2]+'</span>' +
+        '<span class="strat">'+r[3]+'</span>';
+      rowsEl.appendChild(div);
+    });
+
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var canvas = document.getElementById("spark");
+    var ctx = canvas.getContext("2d");
+    var dpr = window.devicePixelRatio || 1;
+
+    function size(){
+      var rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    window.addEventListener("resize", size);
+    size();
+
+    var points = [];
+    var n = 60;
+    var v = 100;
+    for (var i=0;i<n;i++){
+      v += (Math.random()-0.46) * 3.2;
+      points.push(v);
+    }
+
+    function getAccent(){
+      return getComputedStyle(document.documentElement).getPropertyValue('--gain').trim() || '#5c9c86';
+    }
+
+    function draw(){
+      var w = canvas.width/dpr, h = canvas.height/dpr;
+      ctx.clearRect(0,0,w,h);
+      var min = Math.min.apply(null, points), max = Math.max.apply(null, points);
+      var pad = 14;
+      var accent = getAccent();
+
+      ctx.beginPath();
+      points.forEach(function(p,i){
+        var x = (i/(n-1)) * w;
+        var y = h - pad - ((p-min)/(max-min || 1)) * (h - pad*2);
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      var grad = ctx.createLinearGradient(0,0,0,h);
+      grad.addColorStop(0, accent + "55");
+      grad.addColorStop(1, accent + "00");
+      var lastX = w, lastY = h - pad - ((points[n-1]-min)/(max-min||1)) * (h-pad*2);
+      ctx.lineTo(lastX, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      ctx.beginPath();
+      points.forEach(function(p,i){
+        var x = (i/(n-1)) * w;
+        var y = h - pad - ((p-min)/(max-min||1)) * (h - pad*2);
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(lastX-1, lastY, 3, 0, Math.PI*2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+    }
+
+    draw();
+    if (!reduce){
+      setInterval(function(){
+        points.shift();
+        var last = points[points.length-1];
+        points.push(last + (Math.random()-0.46) * 3.2);
+        draw();
+      }, 1400);
+    }
+  })();
+</script>
