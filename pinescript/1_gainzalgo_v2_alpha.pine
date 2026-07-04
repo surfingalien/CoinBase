@@ -1,0 +1,41 @@
+//@version=5
+// GainzAlgo V2 Alpha — Trend & Momentum Confluence
+// EMA stack (9/21/50) + MACD cross + RSI filter.
+// Fires a webhook alert to the AI trading backend on confirmed bar close.
+strategy("GainzAlgo V2 Alpha", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
+
+emaFastLen = input.int(9, "EMA Fast")
+emaMidLen  = input.int(21, "EMA Mid")
+emaSlowLen = input.int(50, "EMA Slow")
+rsiLen     = input.int(14, "RSI Length")
+macdFast   = input.int(12, "MACD Fast")
+macdSlow   = input.int(26, "MACD Slow")
+macdSignal = input.int(9, "MACD Signal")
+webhookSec = input.string("change_me_to_a_long_random_string", "Webhook Secret", group="Webhook")
+
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsiVal  = ta.rsi(close, rsiLen)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+bullTrend = emaFast > emaMid and emaMid > emaSlow
+buyCond   = bullTrend and ta.crossover(macdLine, signalLine) and rsiVal < 65
+sellCond  = ta.crossunder(macdLine, signalLine) and rsiVal > 35
+
+payload(action) =>
+    '{"webhook_secret":"' + webhookSec + '","strategy":"GainzAlgo_V2_Alpha","symbol":"' + syminfo.ticker +
+     '-USD","action":"' + action + '","price":' + str.tostring(close) + ',"rsi":' + str.tostring(rsiVal) +
+     ',"macd":' + str.tostring(macdLine) + ',"ema_9":' + str.tostring(emaFast) +
+     ',"ema_21":' + str.tostring(emaMid) + ',"ema_50":' + str.tostring(emaSlow) + '}'
+
+if buyCond
+    alert(payload("BUY"), alert.freq_once_per_bar_close)
+if sellCond
+    alert(payload("SELL"), alert.freq_once_per_bar_close)
+
+plot(emaFast, color=color.blue, title="EMA 9")
+plot(emaMid, color=color.orange, title="EMA 21")
+plot(emaSlow, color=color.red, title="EMA 50")
+plotshape(buyCond, title="Buy", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sellCond, title="Sell", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)

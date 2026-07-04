@@ -1,0 +1,32 @@
+//@version=5
+// Scalp Momentum — Quick Trades
+// MACD histogram flip in trend direction, filtered by the Choppiness Index
+// so scalps only fire in trending (non-choppy) conditions.
+strategy("Scalp Momentum", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
+
+emaTrendLen = input.int(50, "EMA Trend Filter")
+chopLen     = input.int(14, "Choppiness Length")
+chopMax     = input.float(50.0, "Max Choppiness (below = trending)")
+webhookSec  = input.string("change_me_to_a_long_random_string", "Webhook Secret", group="Webhook")
+
+emaTrend = ta.ema(close, emaTrendLen)
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+
+atrSum = math.sum(ta.atr(1), chopLen)
+highestHigh = ta.highest(high, chopLen)
+lowestLow = ta.lowest(low, chopLen)
+chop = 100 * math.log10(atrSum / (highestHigh - lowestLow)) / math.log10(chopLen)
+
+trending = chop < chopMax
+histFlip = macdHist > 0 and macdHist[1] <= 0
+buyCond  = trending and histFlip and close > emaTrend
+
+payload(action) =>
+    '{"webhook_secret":"' + webhookSec + '","strategy":"Scalp_Momentum","symbol":"' + syminfo.ticker +
+     '-USD","action":"' + action + '","price":' + str.tostring(close) + ',"macd_hist":' + str.tostring(macdHist) +
+     ',"choppiness":' + str.tostring(chop) + '}'
+
+if buyCond
+    alert(payload("BUY"), alert.freq_once_per_bar_close)
+
+plot(macdHist, color=color.teal, title="MACD Histogram", style=plot.style_columns)
