@@ -6,7 +6,7 @@ are never confidence-sized — they sell precisely what the position holds, so
 the database and the exchange account can't drift apart.
 """
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from loguru import logger
 from sqlalchemy import select
@@ -16,24 +16,7 @@ from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
-from app.risk import size_trade
-
-
-async def _compute_daily_pnl_pct(session, usd_balance: float, open_positions: List[Position]) -> float:
-    """Realized P&L since UTC midnight as a fraction of total portfolio value.
-
-    This is what makes MAX_DAILY_LOSS_PCT real: once today's realized losses
-    cross the threshold, size_trade() refuses every new entry until tomorrow.
-    """
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    closed_today = (await session.execute(
-        select(Position).where(Position.status == "closed", Position.closed_at >= today_start)
-    )).scalars().all()
-    realized_today = sum(p.realized_pnl or 0.0 for p in closed_today)
-
-    open_value = sum((p.current_price or p.entry_price) * p.size for p in open_positions)
-    total_value = usd_balance + open_value
-    return realized_today / total_value if total_value > 0 else 0.0
+from app.risk import compute_daily_pnl_pct, size_trade
 
 
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
@@ -140,7 +123,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
 
         # BUY path: size the entry against risk limits.
         usd_balance = await exchange.get_usd_balance()
-        daily_pnl_pct = await _compute_daily_pnl_pct(session, usd_balance, open_positions)
+        daily_pnl_pct = await compute_daily_pnl_pct(session, usd_balance, open_positions)
 
         sizing = size_trade(
             ai_confidence=ai_result["confidence"],

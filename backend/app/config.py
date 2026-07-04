@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     market_analysis_min_confidence: float = 0.60
     market_analysis_granularity_seconds: int = 3600  # Coinbase candle bucket: 60,300,900,3600,21600,86400
 
+    # When on, the batched Claude call is given Anthropic's server-side
+    # web_search tool (billed per-search, separate from token costs) so the
+    # AI can check for very recent news the cached RSS headlines might miss
+    # before deciding. Has no effect if anthropic_api_key is unset.
+    enable_web_research: bool = True
+
 
 settings = Settings()
 

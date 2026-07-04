@@ -181,8 +181,18 @@ def _analyze_with_rules(price: float, ind: Dict[str, Any],
     }
 
 
-def _batch_prompt(candidates: List[Dict[str, Any]], sentiment_block: str) -> str:
+def _batch_prompt(candidates: List[Dict[str, Any]], sentiment_block: str, research_enabled: bool) -> str:
     lines = "\n".join(f"- {c['ta_line']}" for c in candidates)
+    research_instruction = (
+        "2. You have a web_search tool. Use it — sparingly, at most one search "
+        "covering the candidates that most need it — to check for very recent "
+        "(last 24h) market-moving news specific to these symbols that the "
+        "headlines above might be missing (exchange listings, hacks, "
+        "regulatory action, major partnership/ETF news). Skip the search "
+        "entirely if the headlines already cover the relevant symbols."
+        if research_enabled else
+        "2. Factor market sentiment and news into confidence."
+    )
     return f"""You are an expert quantitative crypto trading analyst. Evaluate each
 candidate below and produce one structured trading signal per candidate.
 
@@ -195,11 +205,12 @@ CANDIDATES:
 {sentiment_block}
 INSTRUCTIONS:
 1. Weigh contradictions between indicators; counter-6h-trend entries need much stronger evidence.
-2. Factor market sentiment and news into confidence.
+{research_instruction}
 3. Base stopLoss/takeProfit on ATR and support/resistance.
-4. reasoning: ONE sentence, max 25 words.
+4. reasoning: ONE sentence, max 25 words. If a web search changed your view, say so briefly.
 
-Respond with ONLY a pure JSON array, no markdown fences, one object per candidate:
+After any research, respond with ONLY a pure JSON array, no markdown fences,
+no commentary before or after it, one object per candidate:
 [{{"symbol": "...", "signal": "BUY|SELL|HOLD", "confidence": 0-100, "stopLoss": number, "takeProfit": number, "reasoning": "..."}}]"""
 
 
@@ -219,12 +230,20 @@ def _parse_batch_response(raw_text: str) -> Dict[str, Dict[str, Any]]:
 async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
                                      sentiment_block: str) -> Dict[str, Dict[str, Any]]:
     client = _get_anthropic_client()
+    research_enabled = bool(settings.enable_web_research)
     max_tokens = min(_MAX_TOKENS_CAP, _MAX_TOKENS_BASE + _MAX_TOKENS_PER_CANDIDATE * len(candidates))
-    response = await client.messages.create(
+    if research_enabled:
+        max_tokens += 100  # headroom for the model's research/tool-use turn
+
+    kwargs: Dict[str, Any] = dict(
         model=settings.anthropic_model,
         max_tokens=max_tokens,
-        messages=[{"role": "user", "content": _batch_prompt(candidates, sentiment_block)}],
+        messages=[{"role": "user", "content": _batch_prompt(candidates, sentiment_block, research_enabled)}],
     )
+    if research_enabled:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+
+    response = await client.messages.create(**kwargs)
     raw_text = "".join(block.text for block in response.content if block.type == "text")
     return _parse_batch_response(raw_text)
 
