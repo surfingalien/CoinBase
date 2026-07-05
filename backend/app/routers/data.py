@@ -20,8 +20,8 @@ def _exchange_error(exc: Exception) -> HTTPException:
 
 @router.get("/portfolio")
 async def get_portfolio():
-    exchange = get_exchange()
     try:
+        exchange = get_exchange()
         usd_balance = await exchange.get_usd_balance()
     except Exception as exc:
         raise _exchange_error(exc) from exc
@@ -113,7 +113,10 @@ async def get_stats():
         orders = (await session.execute(select(Order).where(Order.status == "filled"))).scalars().all()
         positions = (await session.execute(select(Position))).scalars().all()
 
-        exchange = get_exchange()
+        try:
+            exchange = get_exchange()
+        except Exception as exc:
+            raise _exchange_error(exc) from exc
         closed = [p for p in positions if p.status == "closed"]
         realized_pnl = sum(p.realized_pnl or 0.0 for p in closed)
 
@@ -182,7 +185,10 @@ async def reset_paper_trading():
     """Wipes all mock trades and holdings — signals, orders, positions, and
     the paper exchange's balance/holdings ledger — back to a clean slate.
     Refuses to run in live mode so real trade history can never be erased."""
-    exchange = get_exchange()
+    try:
+        exchange = get_exchange()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
     if exchange.is_live:
         raise HTTPException(status_code=400, detail="Refusing to reset: live trading is enabled.")
 
@@ -204,8 +210,8 @@ async def get_config():
     today's realized P&L against the daily loss limit — everything the
     dashboard's Risk Manager and Settings tabs show is read straight from
     the same settings object the trading pipeline actually enforces."""
-    exchange = get_exchange()
     try:
+        exchange = get_exchange()
         usd_balance = await exchange.get_usd_balance()
     except Exception as exc:
         raise _exchange_error(exc) from exc
