@@ -248,6 +248,66 @@ async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
     return _parse_batch_response(raw_text)
 
 
+async def run_ai_selftest(symbol: str = "BTC-USD") -> Dict[str, Any]:
+    """One-shot, no-trade probe of the live Claude + web-research brain for a
+    single symbol. Returns exactly what the model received and produced —
+    the compact TA line, whether a web search actually ran, the raw reply,
+    and the parsed decision — so the pipeline can be verified end to end from
+    the dashboard without waiting for a real signal or placing an order."""
+    result: Dict[str, Any] = {
+        "symbol": symbol,
+        "anthropic_configured": bool(settings.anthropic_api_key),
+        "anthropic_model": settings.anthropic_model if settings.anthropic_api_key else None,
+        "web_research_enabled": bool(settings.enable_web_research),
+    }
+    if not settings.anthropic_api_key:
+        result["ok"] = False
+        result["error"] = ("ANTHROPIC_API_KEY is not set on this deployment — the bot is "
+                           "running rule-based only. Set it in Railway to enable Claude.")
+        return result
+
+    prep = await _prepare_symbol(symbol)
+    if prep is None:
+        result["ok"] = False
+        result["error"] = f"Could not fetch enough candle data for {symbol}."
+        return result
+    result["ta_line_sent_to_claude"] = prep["ta_line"]
+    result["rule_based_view"] = prep["rule_result"]
+
+    market_sentiment = await sentiment_mod.get_market_sentiment()
+    sentiment_block = sentiment_mod.prompt_section(market_sentiment)
+    result["sentiment_snapshot"] = market_sentiment or {"disabled": True}
+
+    client = _get_anthropic_client()
+    research_enabled = bool(settings.enable_web_research)
+    kwargs: Dict[str, Any] = dict(
+        model=settings.anthropic_model,
+        max_tokens=_MAX_TOKENS_BASE + _MAX_TOKENS_PER_CANDIDATE + (100 if research_enabled else 0),
+        messages=[{"role": "user", "content": _batch_prompt([prep], sentiment_block, research_enabled)}],
+    )
+    if research_enabled:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+
+    try:
+        response = await client.messages.create(**kwargs)
+    except Exception as exc:
+        result["ok"] = False
+        result["error"] = f"Claude API call failed: {exc}"
+        return result
+
+    block_types = [getattr(b, "type", "?") for b in response.content]
+    result["response_block_types"] = block_types
+    result["web_search_actually_used"] = any(
+        t in ("server_tool_use", "web_search_tool_result") for t in block_types
+    )
+    raw_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+    result["claude_raw_reply"] = raw_text[:2000]
+    parsed = _parse_batch_response(raw_text) if raw_text.strip() else {}
+    result["parsed_decision"] = parsed.get(symbol)
+    result["ok"] = True
+    return result
+
+
 async def _prepare_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     candles = await market_data.fetch_candles(symbol, settings.market_analysis_granularity_seconds)
     if not candles or len(candles["closes"]) < 30:
