@@ -204,6 +204,18 @@ async def reset_paper_trading():
     return {"status": "reset", "usd_balance": await exchange.get_usd_balance()}
 
 
+@router.get("/ai-selftest")
+async def ai_selftest(symbol: str = "BTC-USD"):
+    """Runs one live Claude + web-research analysis for a single symbol and
+    returns the raw result — no order is placed. Lets you confirm from the
+    browser that the AI brain is actually configured and pulling data."""
+    from app import market_analysis
+
+    if symbol not in ALLOWED_PAIRS:
+        raise HTTPException(status_code=400, detail=f"{symbol} is not in the allowed universe.")
+    return await market_analysis.run_ai_selftest(symbol)
+
+
 @router.get("/config")
 async def get_config():
     """A safe (no secrets) snapshot of the risk/system configuration, plus
