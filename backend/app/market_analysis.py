@@ -214,9 +214,29 @@ no commentary before or after it, one object per candidate:
 [{{"symbol": "...", "signal": "BUY|SELL|HOLD", "confidence": 0-100, "stopLoss": number, "takeProfit": number, "reasoning": "..."}}]"""
 
 
-def _parse_batch_response(raw_text: str) -> Dict[str, Dict[str, Any]]:
+def _extract_json(raw_text: str) -> Any:
+    """Pulls the JSON payload out of Claude's reply. With web research on, the
+    model routinely narrates before the array ("I'll check recent news…") and
+    the prompt's "ONLY JSON" instruction isn't always honored — so a bare
+    json.loads fails. Strip fences first; on failure, grab the outermost
+    [...] array (or {...} object) embedded anywhere in the prose."""
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", raw_text.strip())
-    data = json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    for pattern in (r"\[.*\]", r"\{.*\}"):  # array preferred; greedy = outermost
+        match = re.search(pattern, cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                continue
+    raise json.JSONDecodeError("No JSON array/object found in model reply", cleaned, 0)
+
+
+def _parse_batch_response(raw_text: str) -> Dict[str, Dict[str, Any]]:
+    data = _extract_json(raw_text)
     if isinstance(data, dict):
         data = data.get("signals") or data.get("candidates") or [data]
     results: Dict[str, Dict[str, Any]] = {}
