@@ -204,6 +204,88 @@ async def reset_paper_trading():
     return {"status": "reset", "usd_balance": await exchange.get_usd_balance()}
 
 
+async def _live_crypto_holdings(exchange) -> dict:
+    """{'BTC': 0.01, ...} for non-cash assets currently held on the exchange."""
+    if isinstance(exchange, CoinbaseExchange):
+        accounts = exchange._client.get_accounts(limit=250)
+        raw = {}
+        for acct in accounts.get("accounts", []):
+            currency = acct.get("currency")
+            if currency in ("USD", "USDC"):
+                continue
+            try:
+                amount = float(acct["available_balance"]["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if amount > 0:
+                raw[currency] = amount
+        return raw
+    if isinstance(exchange, MockExchange):
+        return {sym.split("-")[0]: amt for sym, amt in exchange.holdings.items() if amt > 0}
+    return {}
+
+
+@router.post("/sync-holdings")
+async def sync_holdings():
+    """Registers crypto you already hold on Coinbase as tracked positions, so
+    the bot manages their exits (take-profit / stop-loss / trailing) going
+    forward. Entry price is set to the current market price (the Advanced
+    Trade balance endpoint doesn't expose original cost basis), so P&L and
+    exit thresholds are measured from now, not your original purchase."""
+    try:
+        exchange = get_exchange()
+        raw = await _live_crypto_holdings(exchange)
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    synced, skipped = [], []
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        tracked = {p.symbol for p in open_positions}
+
+        for currency, amount in raw.items():
+            symbol = f"{currency}-USD"
+            if symbol not in ALLOWED_PAIRS:
+                skipped.append({"symbol": symbol, "reason": "not in the allowed trading universe"})
+                continue
+            if symbol in tracked:
+                skipped.append({"symbol": symbol, "reason": "already tracked as an open position"})
+                continue
+            try:
+                price = await exchange.get_price(symbol)
+            except Exception as exc:
+                skipped.append({"symbol": symbol, "reason": f"price fetch failed: {exc}"})
+                continue
+            value_usd = price * amount
+            if value_usd < 1.0:
+                skipped.append({"symbol": symbol, "reason": "dust (< $1)"})
+                continue
+            session.add(Position(
+                symbol=symbol,
+                side="long",
+                size=amount,
+                entry_price=price,
+                current_price=price,
+                peak_price=price,
+                unrealized_pnl=0.0,
+                exit_reason=None,
+            ))
+            synced.append({"symbol": symbol, "size": amount, "entry_price": price,
+                           "value_usd": round(value_usd, 2)})
+        await session.commit()
+
+    return {
+        "synced": synced,
+        "skipped": skipped,
+        "note": ("Synced positions use current price as cost basis; the monitor now "
+                 "applies take-profit/stop-loss/trailing to them from that price. Only "
+                 "coins with an allowed -USD pair are synced. Don't sync a coin you want "
+                 "to hold long-term — the bot will manage its exit like any position."),
+    }
+
+
 @router.get("/ai-selftest")
 async def ai_selftest(symbol: str = "BTC-USD"):
     """Runs one live Claude + web-research analysis for a single symbol and
