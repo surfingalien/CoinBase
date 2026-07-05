@@ -234,9 +234,14 @@ platform that spins down between requests.
    `https://<that-url>/webhook/tradingview` as the webhook URL in your
    TradingView alerts, and `https://<that-url>/` for the dashboard.
 5. **Persistence matters for a trading bot.** The default SQLite file lives
-   on the container's ephemeral disk, which can reset on redeploy. Either
-   attach a Railway volume mounted where `trading.db` lives, or switch
-   `DATABASE_URL` to a Railway Postgres add-on before running with real money.
+   on the container's ephemeral disk, which can reset on redeploy — a live
+   bot could lose track of its open positions. The simplest durable fix:
+   add a **Railway Postgres** database to the project, then set the app's
+   `DATABASE_URL` variable to a reference to it (`${{Postgres.DATABASE_URL}}`).
+   No code change is needed — the app auto-selects the async Postgres driver
+   and rewrites the URL scheme (`postgres://` / `postgresql://` →
+   `postgresql+asyncpg://`) at startup. Alternatively, attach a Railway
+   volume mounted where `trading.db` lives to persist the SQLite file.
 
 ## Going live on Coinbase
 
