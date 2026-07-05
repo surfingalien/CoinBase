@@ -96,6 +96,30 @@ def _diagnose_pem_issue(secret: str) -> Optional[str]:
     return None
 
 
+def _enrich_coinbase_error(exc: Exception) -> RuntimeError:
+    """Coinbase's SDK raises a bare '401 Client Error: Unauthorized' whose
+    HTTP body usually contains the *actual* reason (missing scope, key not
+    yet active, wrong portfolio, etc.). Pull that body out and append a
+    concrete hint for the most common 401 so the dashboard shows something
+    actionable instead of a dead-end status line."""
+    message = str(exc)
+    response = getattr(exc, "response", None)
+    body = ""
+    if response is not None:
+        body = (getattr(response, "text", "") or "").strip()
+        if body and body not in message:
+            message = f"{message} — {body}"
+
+    if "401" in message or "Unauthorized" in message:
+        message += (
+            " [A valid key that returns 401 usually means the API key lacks "
+            "the 'Trade'/'View' permission, is scoped to a different portfolio "
+            "than the one holding your funds, or was just created and hasn't "
+            "activated yet (wait ~1 min). Confirm at cloud.coinbase.com/access/api.]"
+        )
+    return RuntimeError(message)
+
+
 class Exchange(Protocol):
     is_live: bool
 
@@ -209,11 +233,17 @@ class CoinbaseExchange:
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
 
     async def get_price(self, symbol: str) -> float:
-        product = self._client.get_product(product_id=symbol)
+        try:
+            product = self._client.get_product(product_id=symbol)
+        except Exception as exc:
+            raise _enrich_coinbase_error(exc) from exc
         return float(product["price"])
 
     async def get_usd_balance(self) -> float:
-        accounts = self._client.get_accounts()
+        try:
+            accounts = self._client.get_accounts()
+        except Exception as exc:
+            raise _enrich_coinbase_error(exc) from exc
         for account in accounts.get("accounts", []):
             if account.get("currency") == "USD":
                 return float(account["available_balance"]["value"])
@@ -262,7 +292,7 @@ class CoinbaseExchange:
             }
         except Exception as exc:
             logger.exception("Coinbase order placement failed")
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "error": str(_enrich_coinbase_error(exc))}
 
 
 _exchange_instance: Exchange | None = None
