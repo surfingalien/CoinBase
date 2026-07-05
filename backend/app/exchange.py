@@ -96,12 +96,14 @@ def _diagnose_pem_issue(secret: str) -> Optional[str]:
     return None
 
 
-def _enrich_coinbase_error(exc: Exception) -> RuntimeError:
+def _enrich_coinbase_error(exc: Exception, api_key: str = "") -> RuntimeError:
     """Coinbase's SDK raises a bare '401 Client Error: Unauthorized' whose
-    HTTP body usually contains the *actual* reason (missing scope, key not
-    yet active, wrong portfolio, etc.). Pull that body out and append a
-    concrete hint for the most common 401 so the dashboard shows something
-    actionable instead of a dead-end status line."""
+    HTTP body sometimes carries the actual reason. Pull that body out, and
+    for a 401 append a concrete hint. An *empty-body* 401 specifically means
+    the JWT signature was rejected at the edge (bad key-id or clock skew),
+    not a permissions problem — and the single most common cause is
+    COINBASE_API_KEY not being the full 'organizations/.../apiKeys/...'
+    name, so call that out when the configured key doesn't match that shape."""
     message = str(exc)
     response = getattr(exc, "response", None)
     body = ""
@@ -111,12 +113,25 @@ def _enrich_coinbase_error(exc: Exception) -> RuntimeError:
             message = f"{message} — {body}"
 
     if "401" in message or "Unauthorized" in message:
-        message += (
-            " [A valid key that returns 401 usually means the API key lacks "
-            "the 'Trade'/'View' permission, is scoped to a different portfolio "
-            "than the one holding your funds, or was just created and hasn't "
-            "activated yet (wait ~1 min). Confirm at cloud.coinbase.com/access/api.]"
-        )
+        if api_key and "/apiKeys/" not in api_key:
+            message += (
+                " [COINBASE_API_KEY is '"
+                + (api_key[:16] + "…" if len(api_key) > 16 else api_key)
+                + "', which is NOT the full key name. It must be the entire "
+                "'organizations/{org_id}/apiKeys/{key_id}' string from the "
+                "downloaded key file — a truncated name makes Coinbase reject "
+                "the request signature with this empty-body 401.]"
+            )
+        else:
+            message += (
+                " [Empty-body 401 = the request signature was rejected, not a "
+                "permissions problem. Verify COINBASE_API_KEY is the full "
+                "'organizations/.../apiKeys/...' name and COINBASE_API_SECRET "
+                "is the matching privateKey from the SAME key file; if both are "
+                "correct, the container clock may be skewed (Coinbase JWTs are "
+                "only valid ~2 min). Re-download the key at "
+                "cloud.coinbase.com/access/api if unsure.]"
+            )
     return RuntimeError(message)
 
 
@@ -230,20 +245,21 @@ class CoinbaseExchange:
         issue = _diagnose_pem_issue(api_secret)
         if issue:
             raise ValueError(f"COINBASE_API_SECRET looks malformed: {issue}")
+        self._api_key = api_key
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
 
     async def get_price(self, symbol: str) -> float:
         try:
             product = self._client.get_product(product_id=symbol)
         except Exception as exc:
-            raise _enrich_coinbase_error(exc) from exc
+            raise _enrich_coinbase_error(exc, self._api_key) from exc
         return float(product["price"])
 
     async def get_usd_balance(self) -> float:
         try:
             accounts = self._client.get_accounts()
         except Exception as exc:
-            raise _enrich_coinbase_error(exc) from exc
+            raise _enrich_coinbase_error(exc, self._api_key) from exc
         for account in accounts.get("accounts", []):
             if account.get("currency") == "USD":
                 return float(account["available_balance"]["value"])
@@ -292,7 +308,7 @@ class CoinbaseExchange:
             }
         except Exception as exc:
             logger.exception("Coinbase order placement failed")
-            return {"success": False, "error": str(_enrich_coinbase_error(exc))}
+            return {"success": False, "error": str(_enrich_coinbase_error(exc, self._api_key))}
 
 
 _exchange_instance: Exchange | None = None
