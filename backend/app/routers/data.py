@@ -40,6 +40,14 @@ async def get_portfolio():
                 raise _exchange_error(exc) from exc
             unrealized_pnl = (current_price - p.entry_price) * p.size
             position_value += current_price * p.size
+            # Show the *effective* exit levels the monitor will actually use:
+            # an explicit signal-supplied price when present, otherwise the
+            # global take-profit/stop-loss percentage off entry. Synced
+            # holdings have no explicit price but are still protected by the
+            # percentage fallback — surface that so the dashboard doesn't look
+            # like they're unguarded.
+            effective_tp = p.take_profit_price or p.entry_price * (1 + settings.take_profit_pct)
+            effective_sl = p.stop_loss_price or p.entry_price * (1 - settings.stop_loss_pct)
             position_payload.append({
                 "symbol": p.symbol,
                 "side": p.side,
@@ -47,8 +55,8 @@ async def get_portfolio():
                 "entry_price": p.entry_price,
                 "current_price": current_price,
                 "peak_price": p.peak_price,
-                "take_profit_price": p.take_profit_price,
-                "stop_loss_price": p.stop_loss_price,
+                "take_profit_price": effective_tp,
+                "stop_loss_price": effective_sl,
                 "unrealized_pnl": unrealized_pnl,
             })
 
