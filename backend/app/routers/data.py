@@ -6,7 +6,7 @@ from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from app.exchange import MockExchange, get_exchange
 from app.models import Order, Position, Signal
-from app.risk import compute_daily_pnl_pct
+from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
 router = APIRouter(prefix="/api", tags=["data"])
 
@@ -55,6 +55,7 @@ async def get_portfolio():
         return {
             "total_value": usd_balance + position_value,
             "usd_balance": usd_balance,
+            "trading_budget_usd": settings.trading_budget_usd or None,
             "open_positions": len(positions),
             "is_live": exchange.is_live,
             "positions": position_payload,
@@ -208,12 +209,13 @@ async def get_config():
         usd_balance = await exchange.get_usd_balance()
     except Exception as exc:
         raise _exchange_error(exc) from exc
+    tradeable_balance = effective_usd_balance(usd_balance)
 
     async with async_session() as session:
         open_positions = (await session.execute(
             select(Position).where(Position.status == "open")
         )).scalars().all()
-        daily_pnl_pct = await compute_daily_pnl_pct(session, usd_balance, open_positions)
+        daily_pnl_pct = await compute_daily_pnl_pct(session, tradeable_balance, open_positions)
 
     return {
         "is_live": exchange.is_live,
@@ -224,6 +226,8 @@ async def get_config():
             "max_daily_loss_pct": settings.max_daily_loss_pct,
             "max_open_positions": settings.max_open_positions,
             "base_trade_size_usd": settings.base_trade_size_usd,
+            "trading_budget_usd": settings.trading_budget_usd or None,
+            "tradeable_balance_usd": tradeable_balance,
             "daily_pnl_pct": daily_pnl_pct,
             "daily_loss_limit_hit": daily_pnl_pct <= -settings.max_daily_loss_pct,
         },

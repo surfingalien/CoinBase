@@ -502,6 +502,12 @@ function RiskTab({ isLoading, config }: { isLoading: boolean; config: Config | n
         config.risk.daily_loss_limit_hit ? <Badge variant="danger">Daily loss limit hit</Badge> : <Badge variant="success">Within limits</Badge>
       }>
         <div className="p-5">
+          {config.risk.trading_budget_usd != null && (
+            <StatRow label="Trading budget" value={
+              <span className="text-primary">{formatCurrency(config.risk.trading_budget_usd)}</span>
+            } />
+          )}
+          <StatRow label="Tradeable balance" value={formatCurrency(config.risk.tradeable_balance_usd)} />
           <StatRow label="Max position size (% of portfolio)" value={`${(config.risk.max_position_pct_of_portfolio * 100).toFixed(1)}%`} />
           <StatRow label="Max daily loss" value={`${(config.risk.max_daily_loss_pct * 100).toFixed(1)}%`} />
           <StatRow label="Today's realized P&L" value={

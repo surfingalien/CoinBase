@@ -190,6 +190,12 @@ to run on cached sentiment/news alone with zero search cost.
 - **One position per symbol, `MAX_OPEN_POSITIONS` symbols max** — repeated
   bullish signals can't stack exposure.
 - **Per-trade cap** — `MAX_POSITION_PCT_OF_PORTFOLIO` of equity per entry.
+- **Optional trading budget** — `TRADING_BUDGET_USD` caps how much of the
+  connected account's real balance the system will ever deploy (e.g. `250`
+  to trade with only $250 even if the account holds more). Every sizing
+  calculation and the daily-loss ceiling run against
+  `min(actual_balance, TRADING_BUDGET_USD)` once it's set; leave it at `0`
+  (the default) to trade with the full real balance.
 - **Daily loss circuit-breaker** — realized P&L is tracked per position; once
   today's realized losses cross `MAX_DAILY_LOSS_PCT` of portfolio value, all
   new entries are refused until the next UTC day.

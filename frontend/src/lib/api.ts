@@ -37,6 +37,7 @@ export interface Position {
 export interface Portfolio {
   total_value: number;
   usd_balance: number;
+  trading_budget_usd: number | null;
   open_positions: number;
   is_live: boolean;
   positions: Position[];
@@ -74,6 +75,8 @@ export interface Config {
     max_daily_loss_pct: number;
     max_open_positions: number;
     base_trade_size_usd: number;
+    trading_budget_usd: number | null;
+    tradeable_balance_usd: number;
     daily_pnl_pct: number;
     daily_loss_limit_hit: boolean;
   };

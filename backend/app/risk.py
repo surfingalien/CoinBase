@@ -22,6 +22,16 @@ class SizingResult:
 MIN_TRADE_SIZE_USD = 10.0
 
 
+def effective_usd_balance(actual_balance: float) -> float:
+    """Clamps the real account balance to TRADING_BUDGET_USD when that cap
+    is set, so every sizing/risk calculation downstream treats the budget —
+    not the full account — as the tradeable pool. A budget larger than the
+    actual balance is harmless: the actual balance still wins."""
+    if settings.trading_budget_usd > 0:
+        return min(actual_balance, settings.trading_budget_usd)
+    return actual_balance
+
+
 async def compute_daily_pnl_pct(session, usd_balance: float, open_positions: List) -> float:
     """Realized P&L since UTC midnight as a fraction of total portfolio value.
 

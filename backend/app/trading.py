@@ -16,7 +16,7 @@ from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
-from app.risk import compute_daily_pnl_pct, size_trade
+from app.risk import compute_daily_pnl_pct, effective_usd_balance, size_trade
 
 
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
@@ -121,8 +121,10 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             logger.info(f"Signal {signal_id}: SELL closed {symbol} position(s).")
             return
 
-        # BUY path: size the entry against risk limits.
-        usd_balance = await exchange.get_usd_balance()
+        # BUY path: size the entry against risk limits. Real balance is
+        # clamped to TRADING_BUDGET_USD (if set) before any sizing math, so
+        # the account's actual balance never overrides the intended budget.
+        usd_balance = effective_usd_balance(await exchange.get_usd_balance())
         daily_pnl_pct = await compute_daily_pnl_pct(session, usd_balance, open_positions)
 
         sizing = size_trade(
