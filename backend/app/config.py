@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Portfolio-level exposure limits: the system is long-only spot, holds at
     # most one position per symbol, and caps how many symbols it holds at once.
-    max_open_positions: int = 5
+    max_open_positions: int = 10
 
     # Automatic exit management: the position monitor closes a position the
     # moment its unrealized P&L crosses either threshold. The trailing stop
