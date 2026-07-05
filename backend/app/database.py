@@ -4,6 +4,9 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
 
+DEFAULT_SQLITE_URL = "sqlite+aiosqlite:///./trading.db"
+
+
 def _async_db_url(url: str) -> str:
     """Normalize a database URL to an async SQLAlchemy driver.
 
@@ -13,7 +16,16 @@ def _async_db_url(url: str) -> str:
     `sqlite+aiosqlite://`. This lets the DATABASE_URL Railway provides be used
     verbatim: point DATABASE_URL at the Postgres reference and it just works,
     while the local SQLite default is untouched.
+
+    A blank/whitespace value falls back to the local SQLite default rather
+    than crashing the whole app at import time — this happens when a
+    DATABASE_URL env var is present but set to an empty string (e.g. an
+    unresolved `${{Postgres.DATABASE_URL}}` reference on Railway), which
+    otherwise overrides the settings default with "".
     """
+    url = (url or "").strip()
+    if not url:
+        return DEFAULT_SQLITE_URL
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     if url.startswith("postgresql://"):
