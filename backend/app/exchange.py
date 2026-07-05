@@ -14,6 +14,7 @@ base_size (units of the asset to sell — used for exits, so a close always
 sells exactly what the position holds).
 """
 import json
+import re
 import uuid
 from typing import Any, Dict, Optional, Protocol, Tuple
 
@@ -65,6 +66,20 @@ def _diagnose_pem_issue(secret: str) -> Optional[str]:
             f"JSON string that was itself JSON-encoded again)."
         )
     if "-----BEGIN" not in secret:
+        if secret.startswith("organizations/") or "/apiKeys/" in secret:
+            return (
+                f"it looks like the key *name/ID* (length={len(secret)}), not "
+                f"the private key. Put this value in COINBASE_API_KEY and put "
+                f"the \"privateKey\" field in COINBASE_API_SECRET."
+            )
+        if re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", secret) and len(secret) <= 120:
+            return (
+                f"it looks like a base64 Ed25519 key (length={len(secret)}), not "
+                f"a PEM key. This trading SDK only supports ECDSA keys — on "
+                f"cloud.coinbase.com/access/api, create a new key and choose "
+                f"signature algorithm ECDSA (not Ed25519), then use its "
+                f"'-----BEGIN EC PRIVATE KEY-----' privateKey here."
+            )
         return (
             f"it doesn't contain a '-----BEGIN' PEM header at all "
             f"(length={len(secret)}). Make sure you copied the "

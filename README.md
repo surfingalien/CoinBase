@@ -240,11 +240,14 @@ platform that spins down between requests.
 
 ## Going live on Coinbase
 
-1. Create an Advanced Trade API key at
-   https://www.coinbase.com/settings/api. Grant **View + Trade** permissions
-   only — explicitly leave **Transfer/Withdraw** unchecked, so a leaked key
-   can never move funds out of the account, only trade within it. Add an IP
-   allow-list restricted to your host's address if Coinbase offers one.
+1. Create an API key at https://cloud.coinbase.com/access/api. When asked
+   for the **signature algorithm, choose ECDSA, not Ed25519** — the bundled
+   `coinbase-advanced-py` SDK only understands ECDSA keys (an Ed25519 key is
+   a short base64 string with no `-----BEGIN` header and will be rejected).
+   Grant **View + Trade** permissions only — explicitly leave
+   **Transfer/Withdraw** unchecked, so a leaked key can never move funds out
+   of the account, only trade within it. Add an IP allow-list restricted to
+   your host's address if Coinbase offers one.
 2. Set `COINBASE_API_KEY` (the key name) and `COINBASE_API_SECRET` (the
    private key Coinbase shows you once) as environment variables on your
    host — never commit them to the repo. Coinbase's CDP key creation flow
