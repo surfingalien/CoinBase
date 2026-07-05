@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Bot, LayoutDashboard, Wallet, Activity, Settings as SettingsIcon, Shield, RefreshCw,
-  TrendingUp, TrendingDown, Briefcase, Zap, Brain, Sparkles, CheckCircle2, XCircle, AlertTriangle,
+  TrendingUp, TrendingDown, Briefcase, Zap, Brain, Sparkles, CheckCircle2, XCircle, AlertTriangle, Trash2,
 } from "lucide-react";
 import { cn, formatCurrency, formatRelativeTime } from "@/lib/utils";
 import { api, type ClosedPosition, type Config, type Order, type Portfolio, type Signal, type Stats } from "@/lib/api";
@@ -169,7 +169,7 @@ export default function App() {
               <RiskTab isLoading={isLoading} config={config} />
             )}
             {activeTab === "settings" && (
-              <SettingsTab isLoading={isLoading} config={config} />
+              <SettingsTab isLoading={isLoading} config={config} onReset={fetchData} />
             )}
           </div>
         </main>
@@ -519,7 +519,25 @@ function RiskTab({ isLoading, config }: { isLoading: boolean; config: Config | n
   );
 }
 
-function SettingsTab({ isLoading, config }: { isLoading: boolean; config: Config | null }) {
+function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; config: Config | null; onReset: () => void }) {
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const handleReset = async () => {
+    setResetting(true);
+    setResetError(null);
+    try {
+      await api.resetPaperTrading();
+      setConfirming(false);
+      onReset();
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : "Reset failed.");
+    } finally {
+      setResetting(false);
+    }
+  };
+
   if (isLoading && !config) {
     return <Card className="glass p-8 space-y-4"><Skeleton className="h-4 w-32" /><Skeleton className="h-32 w-full" /></Card>;
   }
@@ -533,6 +551,47 @@ function SettingsTab({ isLoading, config }: { isLoading: boolean; config: Config
           <StatRow label="Allowed trading pairs" value={config.allowed_pairs.length} />
         </div>
       </SectionCard>
+
+      {!config.is_live && (
+        <SectionCard title="Paper Trading Data" icon={Trash2}>
+          <div className="p-5 space-y-3">
+            <p className="text-xs text-foreground-muted leading-relaxed">
+              Clears all mock signals, orders, and positions, and resets the
+              simulated USD balance and holdings back to a fresh start. This
+              cannot be undone.
+            </p>
+            {resetError && <p className="text-xs text-danger">{resetError}</p>}
+            {!confirming ? (
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-danger hover:bg-danger/10 transition-all"
+              >
+                <Trash2 className="h-4 w-4" /> Clear mock trades &amp; holdings
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  disabled={resetting}
+                  className="inline-flex items-center gap-2 rounded-xl bg-danger px-4 py-2 text-sm font-medium text-white hover:bg-danger/90 transition-all disabled:opacity-50"
+                >
+                  {resetting ? "Clearing…" : "Confirm — clear everything"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(false)}
+                  disabled={resetting}
+                  className="rounded-xl border border-border px-4 py-2 text-sm font-medium text-foreground-muted hover:bg-surface-raised transition-all"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        </SectionCard>
+      )}
 
       <SectionCard title="AI Engine" icon={Brain} badge={
         <Badge variant={config.ai.anthropic_configured ? "success" : "default"}>{config.ai.anthropic_configured ? "Claude enabled" : "Rule-based only"}</Badge>

@@ -30,6 +30,11 @@ React dashboard (polls /api/*)
 when you explicitly set `LIVE_TRADING_ENABLED=true` and provide real API
 credentials. Nothing here promises profit — see "Risk" below.
 
+To wipe all mock signals/orders/positions and reset the simulated balance
+back to a clean start, use the **Clear mock trades & holdings** button on the
+dashboard's Settings tab (or `POST /api/reset` directly). It's a no-op that
+returns an error in live mode, so real trade history is never at risk.
+
 ## Repository layout
 
 ```
@@ -49,7 +54,7 @@ backend/         FastAPI app (paper + live trading engine)
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats,
-                    /api/positions/history, /api/config
+                    /api/positions/history, /api/config; POST /api/reset
     main.py         FastAPI app wiring
 frontend/        React + Vite + Tailwind dashboard (Dashboard / Portfolio /
                  Signals / Risk Manager / Settings tabs, all live-data)
