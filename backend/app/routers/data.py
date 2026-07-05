@@ -4,7 +4,7 @@ from sqlalchemy import delete, select
 from app import sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
-from app.exchange import MockExchange, get_exchange
+from app.exchange import CoinbaseExchange, MockExchange, get_exchange
 from app.models import Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
@@ -214,6 +214,57 @@ async def ai_selftest(symbol: str = "BTC-USD"):
     if symbol not in ALLOWED_PAIRS:
         raise HTTPException(status_code=400, detail=f"{symbol} is not in the allowed universe.")
     return await market_analysis.run_ai_selftest(symbol)
+
+
+@router.get("/diagnostics")
+async def diagnostics():
+    """One-stop troubleshooting snapshot: the live account's non-zero
+    per-currency balances (so USD vs USDC is unambiguous) plus the most
+    recent signals that did NOT execute, with their exact reasons — including
+    any '[Order failed: ...]' text captured when a live order was rejected."""
+    exchange = get_exchange()
+    out: dict = {"is_live": exchange.is_live}
+
+    if isinstance(exchange, CoinbaseExchange):
+        try:
+            accounts = exchange._client.get_accounts(limit=250)
+            balances = {}
+            for acct in accounts.get("accounts", []):
+                try:
+                    value = float(acct["available_balance"]["value"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if value > 0:
+                    balances[acct.get("currency")] = value
+            out["nonzero_balances"] = balances
+            out["note"] = (
+                "Trading pairs are '-USD'; orders draw from the USD balance. "
+                "If your cash shows under USDC (not USD), convert USDC->USD on "
+                "Coinbase (instant, 1:1, free) so buys can fill."
+            )
+        except Exception as exc:
+            out["balance_error"] = str(exc)
+    else:
+        out["nonzero_balances"] = {"USD (paper)": await exchange.get_usd_balance()}
+
+    async with async_session() as session:
+        recent = (await session.execute(
+            select(Signal)
+            .where(Signal.status.in_(["failed", "rejected"]))
+            .order_by(Signal.timestamp.desc())
+            .limit(10)
+        )).scalars().all()
+        out["recent_non_executed"] = [
+            {
+                "time": s.timestamp.isoformat(),
+                "symbol": s.symbol,
+                "action": s.action,
+                "status": s.status,
+                "reason": s.ai_reasoning,
+            }
+            for s in recent
+        ]
+    return out
 
 
 @router.get("/config")
