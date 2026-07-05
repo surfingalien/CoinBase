@@ -128,6 +128,12 @@ class CoinbaseExchange:
     def __init__(self, api_key: str, api_secret: str) -> None:
         from coinbase.rest import RESTClient
 
+        # CDP API secrets are a multi-line PEM EC private key. Pasting one
+        # into a single-line env var field routinely flattens its real
+        # newlines into literal "\n" text (and sometimes wraps it in quotes)
+        # — normalize both before handing it to the SDK's PEM parser, rather
+        # than failing with a cryptic "Unable to load PEM file" error.
+        api_secret = api_secret.strip().strip('"').replace("\\n", "\n")
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
 
     async def get_price(self, symbol: str) -> float:

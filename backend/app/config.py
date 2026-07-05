@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = 0.05
     base_trade_size_usd: float = 1000.0
 
+    # Optional hard ceiling on how much of the account's real USD balance the
+    # system will ever deploy — e.g. set to 250 to trade with only $250 even
+    # if the connected Coinbase account holds more. All position sizing,
+    # the daily-loss ceiling, and portfolio-pct limits are computed against
+    # min(actual_balance, trading_budget_usd) once this is set. Leave unset
+    # (0) to use the full real account balance, unchanged from before.
+    trading_budget_usd: float = 0.0
+
     # Portfolio-level exposure limits: the system is long-only spot, holds at
     # most one position per symbol, and caps how many symbols it holds at once.
     max_open_positions: int = 5
