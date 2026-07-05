@@ -266,46 +266,75 @@ async def run_ai_selftest(symbol: str = "BTC-USD") -> Dict[str, Any]:
                            "running rule-based only. Set it in Railway to enable Claude.")
         return result
 
-    prep = await _prepare_symbol(symbol)
-    if prep is None:
-        result["ok"] = False
-        result["error"] = f"Could not fetch enough candle data for {symbol}."
-        return result
-    result["ta_line_sent_to_claude"] = prep["ta_line"]
-    result["rule_based_view"] = prep["rule_result"]
-
-    market_sentiment = await sentiment_mod.get_market_sentiment()
-    sentiment_block = sentiment_mod.prompt_section(market_sentiment)
-    result["sentiment_snapshot"] = market_sentiment or {"disabled": True}
-
-    client = _get_anthropic_client()
-    research_enabled = bool(settings.enable_web_research)
-    kwargs: Dict[str, Any] = dict(
-        model=settings.anthropic_model,
-        max_tokens=_MAX_TOKENS_BASE + _MAX_TOKENS_PER_CANDIDATE + (100 if research_enabled else 0),
-        messages=[{"role": "user", "content": _batch_prompt([prep], sentiment_block, research_enabled)}],
-    )
-    if research_enabled:
-        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
-
     try:
-        response = await client.messages.create(**kwargs)
-    except Exception as exc:
-        result["ok"] = False
-        result["error"] = f"Claude API call failed: {exc}"
-        return result
+        prep = await _prepare_symbol(symbol)
+        if prep is None:
+            result["ok"] = False
+            result["error"] = f"Could not fetch enough candle data for {symbol}."
+            return result
+        result["ta_line_sent_to_claude"] = prep["ta_line"]
+        result["rule_based_view"] = prep["rule_result"]
 
-    block_types = [getattr(b, "type", "?") for b in response.content]
-    result["response_block_types"] = block_types
-    result["web_search_actually_used"] = any(
-        t in ("server_tool_use", "web_search_tool_result") for t in block_types
-    )
-    raw_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
-    result["claude_raw_reply"] = raw_text[:2000]
-    parsed = _parse_batch_response(raw_text) if raw_text.strip() else {}
-    result["parsed_decision"] = parsed.get(symbol)
-    result["ok"] = True
-    return result
+        try:
+            market_sentiment = await sentiment_mod.get_market_sentiment()
+            sentiment_block = sentiment_mod.prompt_section(market_sentiment)
+        except Exception as exc:
+            market_sentiment, sentiment_block = None, ""
+            result["sentiment_error"] = str(exc)
+        result["sentiment_snapshot"] = market_sentiment or {"disabled": True}
+
+        client = _get_anthropic_client()
+        research_enabled = bool(settings.enable_web_research)
+        max_tokens = _MAX_TOKENS_BASE + _MAX_TOKENS_PER_CANDIDATE + (100 if research_enabled else 0)
+        content = _batch_prompt([prep], sentiment_block, research_enabled)
+
+        async def _call(with_tools: bool):
+            kwargs: Dict[str, Any] = dict(
+                model=settings.anthropic_model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": content}],
+            )
+            if with_tools:
+                kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+            return await client.messages.create(**kwargs)
+
+        try:
+            response = await _call(with_tools=research_enabled)
+        except Exception as exc:
+            # Isolate whether the web-search tool is the problem vs Claude itself.
+            if research_enabled:
+                result["web_search_error"] = (
+                    f"The call failed WITH the web_search tool ({exc}); retrying without it. "
+                    "If the retry succeeds, web research is unavailable on this SDK/plan — "
+                    "the bot still trades on Claude + technicals, just without live search."
+                )
+                try:
+                    response = await _call(with_tools=False)
+                except Exception as exc2:
+                    result["ok"] = False
+                    result["error"] = f"Claude API call failed even without tools: {exc2}"
+                    return result
+            else:
+                result["ok"] = False
+                result["error"] = f"Claude API call failed: {exc}"
+                return result
+
+        block_types = [getattr(b, "type", "?") for b in response.content]
+        result["response_block_types"] = block_types
+        result["web_search_actually_used"] = any(
+            t in ("server_tool_use", "web_search_tool_result") for t in block_types
+        )
+        raw_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+        result["claude_raw_reply"] = raw_text[:2000]
+        parsed = _parse_batch_response(raw_text) if raw_text.strip() else {}
+        result["parsed_decision"] = parsed.get(symbol)
+        result["ok"] = True
+        return result
+    except Exception as exc:
+        logger.exception("AI selftest failed")
+        result["ok"] = False
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
 
 
 async def _prepare_symbol(symbol: str) -> Optional[Dict[str, Any]]:
