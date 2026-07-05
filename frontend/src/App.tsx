@@ -560,6 +560,25 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
     }
   };
 
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const r = await api.syncHoldings();
+      const syncedTxt = r.synced.length
+        ? r.synced.map((s) => `${s.symbol} (${formatCurrency(s.value_usd)})`).join(", ")
+        : "none";
+      setSyncResult(`Synced: ${syncedTxt}. Skipped: ${r.skipped.length}.`);
+      onReset();
+    } catch (err) {
+      setSyncResult(err instanceof Error ? err.message : "Sync failed.");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   if (isLoading && !config) {
     return <Card className="glass p-8 space-y-4"><Skeleton className="h-4 w-32" /><Skeleton className="h-32 w-full" /></Card>;
   }
@@ -569,8 +588,25 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
       <SectionCard title="Trading Mode" icon={Bot} badge={
         <Badge variant={config.is_live ? "danger" : "warning"}>{config.is_live ? "LIVE TRADING" : "PAPER TRADING"}</Badge>
       }>
-        <div className="p-5">
+        <div className="p-5 space-y-4">
           <StatRow label="Allowed trading pairs" value={config.allowed_pairs.length} />
+          <div className="space-y-2">
+            <p className="text-xs text-foreground-muted leading-relaxed">
+              Register crypto you already hold on Coinbase as tracked positions
+              so the bot manages their exits (take-profit / stop-loss). Entry is
+              set to the current price. Don't sync a coin you want to hold long-term.
+            </p>
+            {syncResult && <p className="text-xs text-foreground-muted">{syncResult}</p>}
+            <button
+              type="button"
+              onClick={handleSync}
+              disabled={syncing}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+              {syncing ? "Syncing…" : "Sync holdings from Coinbase"}
+            </button>
+          </div>
         </div>
       </SectionCard>
 

@@ -125,4 +125,9 @@ export const api = {
   positionHistory: () => getJSON<ClosedPosition[]>("/api/positions/history"),
   config: () => getJSON<Config>("/api/config"),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
+  syncHoldings: () => postJSON<{
+    synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
+    skipped: { symbol: string; reason: string }[];
+    note: string;
+  }>("/api/sync-holdings"),
 };
