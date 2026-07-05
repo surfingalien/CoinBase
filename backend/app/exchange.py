@@ -281,14 +281,23 @@ class CoinbaseExchange:
         return float(product["price"])
 
     async def get_usd_balance(self) -> float:
+        """Spendable cash balance. Counts both USD and USDC — Coinbase treats
+        them 1:1 for USD-quoted products and most retail funds actually sit as
+        USDC — and requests up to 250 accounts so the cash balance isn't
+        missed to pagination when the account holds many assets."""
         try:
-            accounts = self._client.get_accounts()
+            accounts = self._client.get_accounts(limit=250)
         except Exception as exc:
             raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
+
+        total = 0.0
         for account in accounts.get("accounts", []):
-            if account.get("currency") == "USD":
-                return float(account["available_balance"]["value"])
-        return 0.0
+            if account.get("currency") in ("USD", "USDC"):
+                try:
+                    total += float(account["available_balance"]["value"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return total
 
     async def place_market_order(
         self, symbol: str, side: str,
