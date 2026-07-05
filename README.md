@@ -241,7 +241,12 @@ platform that spins down between requests.
    allow-list restricted to your host's address if Coinbase offers one.
 2. Set `COINBASE_API_KEY` (the key name) and `COINBASE_API_SECRET` (the
    private key Coinbase shows you once) as environment variables on your
-   host — never commit them to the repo.
+   host — never commit them to the repo. `COINBASE_API_SECRET` is a
+   multi-line PEM EC private key; the app normalizes literal `\n` sequences
+   and wrapping quotes back into real newlines automatically, so it's safe
+   to paste it as a single line if that's how your platform's variable
+   editor collapsed it. If you still see `Unable to load PEM file`, re-copy
+   the key directly from https://cloud.coinbase.com/access/api.
 3. Leave `LIVE_TRADING_ENABLED=false` first and watch `GET /api/signals` and
    `GET /api/orders` in paper mode until you trust the strategies' behavior.
 4. When ready, set `LIVE_TRADING_ENABLED=true` and restart. `get_exchange()`
