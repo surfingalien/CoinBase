@@ -135,6 +135,31 @@ def _enrich_coinbase_error(exc: Exception, api_key: str = "") -> RuntimeError:
     return RuntimeError(message)
 
 
+async def _enrich_coinbase_error_async(exc: Exception, api_key: str = "") -> RuntimeError:
+    """Same as _enrich_coinbase_error, but for a 401 it also measures the
+    real container-vs-Coinbase clock skew and states it outright — turning
+    the 'maybe clock skew' guess into a definitive yes/no."""
+    enriched = _enrich_coinbase_error(exc, api_key)
+    message = str(enriched)
+    if "401" in message or "Unauthorized" in message:
+        skew = await market_data.fetch_clock_skew_seconds()
+        if skew is not None:
+            if abs(skew) > 30:
+                message += (
+                    f" [CONFIRMED: container clock is {skew:+.0f}s off Coinbase's "
+                    f"server — this alone causes the 401. The host clock needs "
+                    f"to be corrected/synced (NTP).]"
+                )
+            else:
+                message += (
+                    f" [Clock skew checked and fine ({skew:+.1f}s), so this is a "
+                    f"credential mismatch — re-download the key and set BOTH "
+                    f"COINBASE_API_KEY (name) and COINBASE_API_SECRET (privateKey) "
+                    f"from that one file.]"
+                )
+    return RuntimeError(message)
+
+
 class Exchange(Protocol):
     is_live: bool
 
@@ -252,14 +277,14 @@ class CoinbaseExchange:
         try:
             product = self._client.get_product(product_id=symbol)
         except Exception as exc:
-            raise _enrich_coinbase_error(exc, self._api_key) from exc
+            raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
         return float(product["price"])
 
     async def get_usd_balance(self) -> float:
         try:
             accounts = self._client.get_accounts()
         except Exception as exc:
-            raise _enrich_coinbase_error(exc, self._api_key) from exc
+            raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
         for account in accounts.get("accounts", []):
             if account.get("currency") == "USD":
                 return float(account["available_balance"]["value"])
