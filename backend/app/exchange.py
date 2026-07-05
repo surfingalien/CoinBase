@@ -50,6 +50,37 @@ def _normalize_cdp_credentials(api_key: str, api_secret: str) -> Tuple[str, str]
     return api_key.strip(), api_secret
 
 
+def _diagnose_pem_issue(secret: str) -> Optional[str]:
+    """Structural check that reports *why* a secret doesn't look like a
+    valid PEM key, without ever echoing the key material itself — only the
+    PEM boilerplate markers (which are constant, public text) and length/
+    newline counts are safe to surface. Returns None if the shape looks
+    fine (the underlying crypto library still does the real validation)."""
+    if not secret:
+        return "it's empty — COINBASE_API_SECRET has no value."
+    if "\\n" in secret:
+        return (
+            f"it still contains a literal backslash-n after normalization "
+            f"(length={len(secret)}) — it may be double-escaped (e.g. a "
+            f"JSON string that was itself JSON-encoded again)."
+        )
+    if "-----BEGIN" not in secret:
+        return (
+            f"it doesn't contain a '-----BEGIN' PEM header at all "
+            f"(length={len(secret)}). Make sure you copied the "
+            f"\"privateKey\" field's value, not \"name\" or something else."
+        )
+    if "-----END" not in secret:
+        return f"it has a BEGIN marker but no END marker (length={len(secret)}) — it looks truncated."
+    if secret.count("\n") < 2:
+        return (
+            f"it has BEGIN/END markers but no line breaks between them "
+            f"(length={len(secret)}) — the key body must be on its own "
+            f"line(s), separate from the markers."
+        )
+    return None
+
+
 class Exchange(Protocol):
     is_live: bool
 
@@ -157,6 +188,9 @@ class CoinbaseExchange:
         from coinbase.rest import RESTClient
 
         api_key, api_secret = _normalize_cdp_credentials(api_key, api_secret)
+        issue = _diagnose_pem_issue(api_secret)
+        if issue:
+            raise ValueError(f"COINBASE_API_SECRET looks malformed: {issue}")
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
 
     async def get_price(self, symbol: str) -> float:
