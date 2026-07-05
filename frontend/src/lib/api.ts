@@ -98,7 +98,10 @@ export interface Config {
 
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url} responded ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || `${url} responded ${res.status}`);
+  }
   return res.json();
 }
 
