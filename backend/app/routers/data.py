@@ -11,10 +11,20 @@ from app.risk import compute_daily_pnl_pct
 router = APIRouter(prefix="/api", tags=["data"])
 
 
+def _exchange_error(exc: Exception) -> HTTPException:
+    """Surfaces the exchange's actual failure (e.g. a bad Coinbase API key/
+    secret) to the dashboard instead of a bare 500, so a live-mode
+    misconfiguration is visible without digging through server logs."""
+    return HTTPException(status_code=502, detail=f"Exchange error: {exc}")
+
+
 @router.get("/portfolio")
 async def get_portfolio():
     exchange = get_exchange()
-    usd_balance = await exchange.get_usd_balance()
+    try:
+        usd_balance = await exchange.get_usd_balance()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
 
     async with async_session() as session:
         positions = (await session.execute(
@@ -24,7 +34,10 @@ async def get_portfolio():
         position_value = 0.0
         position_payload = []
         for p in positions:
-            current_price = await exchange.get_price(p.symbol)
+            try:
+                current_price = await exchange.get_price(p.symbol)
+            except Exception as exc:
+                raise _exchange_error(exc) from exc
             unrealized_pnl = (current_price - p.entry_price) * p.size
             position_value += current_price * p.size
             position_payload.append({
@@ -106,7 +119,10 @@ async def get_stats():
         unrealized_pnl = 0.0
         for p in positions:
             if p.status == "open":
-                current_price = await exchange.get_price(p.symbol)
+                try:
+                    current_price = await exchange.get_price(p.symbol)
+                except Exception as exc:
+                    raise _exchange_error(exc) from exc
                 unrealized_pnl += (current_price - p.entry_price) * p.size
 
         wins = sum(1 for p in closed if (p.realized_pnl or 0.0) > 0)
@@ -188,7 +204,10 @@ async def get_config():
     dashboard's Risk Manager and Settings tabs show is read straight from
     the same settings object the trading pipeline actually enforces."""
     exchange = get_exchange()
-    usd_balance = await exchange.get_usd_balance()
+    try:
+        usd_balance = await exchange.get_usd_balance()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
 
     async with async_session() as session:
         open_positions = (await session.execute(

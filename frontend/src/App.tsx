@@ -73,22 +73,32 @@ export default function App() {
 
   const fetchData = async () => {
     setIsLoading(true);
-    try {
-      const [p, s, o, st, ch, cfg] = await Promise.all([
-        api.portfolio(), api.signals(), api.orders(), api.stats(), api.positionHistory(), api.config(),
-      ]);
-      setPortfolio(p);
-      setSignals(s);
-      setOrders(o);
-      setStats(st);
-      setClosedPositions(ch);
-      setConfig(cfg);
-      setError(null);
-    } catch (err) {
+    const [p, s, o, st, ch, cfg] = await Promise.allSettled([
+      api.portfolio(), api.signals(), api.orders(), api.stats(), api.positionHistory(), api.config(),
+    ]);
+    if (p.status === "fulfilled") setPortfolio(p.value);
+    if (s.status === "fulfilled") setSignals(s.value);
+    if (o.status === "fulfilled") setOrders(o.value);
+    if (st.status === "fulfilled") setStats(st.value);
+    if (ch.status === "fulfilled") setClosedPositions(ch.value);
+    if (cfg.status === "fulfilled") setConfig(cfg.value);
+
+    const failures = [
+      ["portfolio", p], ["signals", s], ["orders", o],
+      ["stats", st], ["position history", ch], ["config", cfg],
+    ].filter(([, r]) => (r as PromiseSettledResult<unknown>).status === "rejected");
+
+    if (failures.length === 6) {
       setError("Could not reach the trading backend. Is it running on :8000?");
-    } finally {
-      setIsLoading(false);
+    } else if (failures.length > 0) {
+      const detail = failures
+        .map(([name, r]) => `${name}: ${(r as PromiseRejectedResult).reason?.message ?? "failed"}`)
+        .join("; ");
+      setError(`Some data failed to load — ${detail}`);
+    } else {
+      setError(null);
     }
+    setIsLoading(false);
   };
 
   useEffect(() => {
@@ -156,6 +166,12 @@ export default function App() {
 
         <main className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1600px] p-6 lg:p-8 space-y-6">
+            {error && (
+              <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
             {activeTab === "dashboard" && (
               <DashboardTab isLoading={isLoading} portfolio={portfolio} stats={stats} signals={signals} orders={orders} />
             )}
