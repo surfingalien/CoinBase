@@ -13,13 +13,41 @@ Orders are expressed either as quote_size (USD to spend — used for buys) or
 base_size (units of the asset to sell — used for exits, so a close always
 sells exactly what the position holds).
 """
+import json
 import uuid
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol, Tuple
 
 from loguru import logger
 
 from app import market_data
 from app.config import settings
+
+
+def _normalize_cdp_credentials(api_key: str, api_secret: str) -> Tuple[str, str]:
+    """Coinbase's CDP key-creation flow downloads a JSON file shaped like
+    {"name": "...", "privateKey": "-----BEGIN EC PRIVATE KEY-----\\n...\\n-----END EC PRIVATE KEY-----\\n"}.
+    Two copy-paste mistakes are common when moving that into env vars:
+    pasting the *entire JSON file* into COINBASE_API_SECRET (or even
+    COINBASE_API_KEY) instead of just the relevant field, and having a
+    single-line env var editor flatten the PEM's real newlines into literal
+    "\\n" text. Both are recovered here — JSON parsing correctly un-escapes
+    "\\n" sequences for free, so this also fixes the plain flattened case."""
+    for blob in (api_secret, api_key):
+        candidate = blob.strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        private_key = data.get("privateKey") or data.get("private_key")
+        if private_key:
+            api_key = data.get("name") or data.get("apiKey") or api_key
+            api_secret = private_key
+            break
+
+    api_secret = api_secret.strip().strip('"').replace("\\n", "\n")
+    return api_key.strip(), api_secret
 
 
 class Exchange(Protocol):
@@ -128,12 +156,7 @@ class CoinbaseExchange:
     def __init__(self, api_key: str, api_secret: str) -> None:
         from coinbase.rest import RESTClient
 
-        # CDP API secrets are a multi-line PEM EC private key. Pasting one
-        # into a single-line env var field routinely flattens its real
-        # newlines into literal "\n" text (and sometimes wraps it in quotes)
-        # — normalize both before handing it to the SDK's PEM parser, rather
-        # than failing with a cryptic "Unable to load PEM file" error.
-        api_secret = api_secret.strip().strip('"').replace("\\n", "\n")
+        api_key, api_secret = _normalize_cdp_credentials(api_key, api_secret)
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
 
     async def get_price(self, symbol: str) -> float:
