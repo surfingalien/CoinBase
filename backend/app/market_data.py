@@ -55,3 +55,24 @@ async def fetch_last_price(product_id: str) -> Optional[float]:
             return float(resp.json()["price"])
     except Exception:
         return None
+
+
+async def fetch_clock_skew_seconds() -> Optional[float]:
+    """Container-clock minus Coinbase's server clock, in seconds, using
+    Coinbase's public (no-auth) time endpoint. A large value explains an
+    otherwise-inexplicable auth failure: Coinbase JWTs carry timestamp
+    claims valid only ~2 minutes, so a skewed clock 401s every request.
+    Returns None if the time endpoint can't be reached."""
+    import time
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{COINBASE_EXCHANGE_API}/time",
+                headers={"User-Agent": "GainzAI/1.0"},
+            )
+            resp.raise_for_status()
+            server_epoch = float(resp.json()["epoch"])
+        return time.time() - server_epoch
+    except Exception:
+        return None
