@@ -50,14 +50,22 @@ class MockExchange:
     real market prices so take-profit/stop-loss and P&L behave realistically."""
 
     is_live = False
+    STARTING_BALANCE_USD = 25000.0
 
     def __init__(self) -> None:
-        self.usd_balance = 25000.0
+        self.usd_balance = self.STARTING_BALANCE_USD
         # Best-effort holdings ledger. In-memory only: after a restart the
         # database still knows the open positions, so exits are always
         # honoured even if this ledger has been reset.
         self.holdings: Dict[str, float] = {}
         self._last_price: Dict[str, float] = dict(_FALLBACK_PRICES)
+
+    def reset(self) -> None:
+        """Wipes paper-trading state back to a fresh starting balance —
+        pairs with clearing the DB's signals/orders/positions so the
+        dashboard and the simulator agree on a clean slate."""
+        self.usd_balance = self.STARTING_BALANCE_USD
+        self.holdings.clear()
 
     async def get_price(self, symbol: str) -> float:
         live = await market_data.fetch_last_price(symbol)

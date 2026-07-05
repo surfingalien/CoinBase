@@ -102,6 +102,15 @@ async function getJSON<T>(url: string): Promise<T> {
   return res.json();
 }
 
+async function postJSON<T>(url: string): Promise<T> {
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || `${url} responded ${res.status}`);
+  }
+  return res.json();
+}
+
 export const api = {
   portfolio: () => getJSON<Portfolio>("/api/portfolio"),
   signals: () => getJSON<Signal[]>("/api/signals"),
@@ -109,4 +118,5 @@ export const api = {
   stats: () => getJSON<Stats>("/api/stats"),
   positionHistory: () => getJSON<ClosedPosition[]>("/api/positions/history"),
   config: () => getJSON<Config>("/api/config"),
+  resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
 };

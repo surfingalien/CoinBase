@@ -1,10 +1,10 @@
-from fastapi import APIRouter
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import delete, select
 
 from app import sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
-from app.exchange import get_exchange
+from app.exchange import MockExchange, get_exchange
 from app.models import Order, Position, Signal
 from app.risk import compute_daily_pnl_pct
 
@@ -158,6 +158,27 @@ async def get_position_history(limit: int = 30):
             }
             for p in closed
         ]
+
+
+@router.post("/reset")
+async def reset_paper_trading():
+    """Wipes all mock trades and holdings — signals, orders, positions, and
+    the paper exchange's balance/holdings ledger — back to a clean slate.
+    Refuses to run in live mode so real trade history can never be erased."""
+    exchange = get_exchange()
+    if exchange.is_live:
+        raise HTTPException(status_code=400, detail="Refusing to reset: live trading is enabled.")
+
+    async with async_session() as session:
+        await session.execute(delete(Signal))
+        await session.execute(delete(Order))
+        await session.execute(delete(Position))
+        await session.commit()
+
+    if isinstance(exchange, MockExchange):
+        exchange.reset()
+
+    return {"status": "reset", "usd_balance": await exchange.get_usd_balance()}
 
 
 @router.get("/config")
