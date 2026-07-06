@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Bot, LayoutDashboard, Wallet, Activity, Settings as SettingsIcon, Shield, RefreshCw,
   TrendingUp, TrendingDown, Briefcase, Zap, Brain, Sparkles, CheckCircle2, XCircle, AlertTriangle, Trash2,
+  Menu, X,
 } from "lucide-react";
 import { cn, formatCurrency, formatRelativeTime } from "@/lib/utils";
 import { api, type ClosedPosition, type Config, type Order, type Portfolio, type Signal, type Stats } from "@/lib/api";
@@ -60,8 +61,49 @@ const TAB_TITLES: Record<TabId, string> = {
   settings: "Settings",
 };
 
+function SidebarNav({ activeTab, onNavigate, portfolio }: {
+  activeTab: TabId; onNavigate: (id: TabId) => void; portfolio: Portfolio | null;
+}) {
+  return (
+    <>
+      <div className="flex h-16 items-center gap-3 border-b border-border px-6">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/60 shadow-lg shadow-primary/30">
+          <Bot className="h-5 w-5 text-white" />
+        </div>
+        <div>
+          <p className="text-sm font-bold leading-none">GainzAI</p>
+          <p className="text-[10px] text-foreground-muted mt-0.5">Trading System</p>
+        </div>
+      </div>
+      <nav className="flex-1 space-y-1 p-4">
+        {NAV_ITEMS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onNavigate(item.id)}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all text-left",
+              activeTab === item.id ? "bg-primary/10 text-primary" : "text-foreground-muted hover:text-foreground hover:bg-surface-raised"
+            )}
+          >
+            <item.icon className="h-4 w-4 shrink-0" /> {item.label}
+          </button>
+        ))}
+      </nav>
+      {portfolio && (
+        <div className="p-4">
+          <Badge variant={portfolio.is_live ? "danger" : "warning"}>
+            {portfolio.is_live ? "LIVE TRADING" : "PAPER TRADING"}
+          </Badge>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
@@ -112,43 +154,49 @@ export default function App() {
       <div className="pointer-events-none fixed inset-0 grid-pattern opacity-30" />
       <div className="pointer-events-none fixed -top-40 -left-40 h-96 w-96 rounded-full bg-primary/5 blur-3xl" />
 
+      {/* Desktop sidebar */}
       <aside className="hidden lg:flex z-20 w-64 shrink-0 flex-col border-r border-border bg-surface/50 backdrop-blur-xl">
-        <div className="flex h-16 items-center gap-3 border-b border-border px-6">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/60 shadow-lg shadow-primary/30">
-            <Bot className="h-5 w-5 text-white" />
-          </div>
-          <div>
-            <p className="text-sm font-bold leading-none">GainzAI</p>
-            <p className="text-[10px] text-foreground-muted mt-0.5">Trading System</p>
-          </div>
-        </div>
-        <nav className="flex-1 space-y-1 p-4">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setActiveTab(item.id)}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all text-left",
-                activeTab === item.id ? "bg-primary/10 text-primary" : "text-foreground-muted hover:text-foreground hover:bg-surface-raised"
-              )}
-            >
-              <item.icon className="h-4 w-4 shrink-0" /> {item.label}
-            </button>
-          ))}
-        </nav>
-        {portfolio && (
-          <div className="p-4">
-            <Badge variant={portfolio.is_live ? "danger" : "warning"}>
-              {portfolio.is_live ? "LIVE TRADING" : "PAPER TRADING"}
-            </Badge>
-          </div>
+        <SidebarNav activeTab={activeTab} portfolio={portfolio} onNavigate={setActiveTab} />
+      </aside>
+
+      {/* Mobile drawer + backdrop */}
+      {mobileNavOpen && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={() => setMobileNavOpen(false)} />
+      )}
+      <aside
+        className={cn(
+          "lg:hidden fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-border bg-surface backdrop-blur-xl transition-transform duration-300",
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full"
         )}
+      >
+        <button
+          type="button"
+          onClick={() => setMobileNavOpen(false)}
+          className="absolute right-3 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-lg text-foreground-muted hover:bg-surface-raised"
+          aria-label="Close menu"
+        >
+          <X className="h-4 w-4" />
+        </button>
+        <SidebarNav
+          activeTab={activeTab}
+          portfolio={portfolio}
+          onNavigate={(id) => { setActiveTab(id); setMobileNavOpen(false); }}
+        />
       </aside>
 
       <div className="relative flex flex-1 flex-col overflow-hidden">
-        <header className="relative z-10 flex h-16 items-center justify-between gap-4 border-b border-border bg-surface/50 px-6 backdrop-blur-xl">
-          <h2 className="text-lg font-semibold">{TAB_TITLES[activeTab]}</h2>
+        <header className="relative z-10 flex h-16 items-center justify-between gap-4 border-b border-border bg-surface/50 px-4 lg:px-6 backdrop-blur-xl">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="lg:hidden flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-surface-raised text-foreground-muted hover:text-foreground active:scale-95"
+              aria-label="Open menu"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <h2 className="text-lg font-semibold">{TAB_TITLES[activeTab]}</h2>
+          </div>
           <div className="flex items-center gap-2">
             {error ? (
               <Badge variant="danger"><AlertTriangle className="h-3 w-3" />Offline</Badge>
