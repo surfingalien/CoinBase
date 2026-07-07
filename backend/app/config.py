@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # Validation harness (/api/validate): the fraction of history held out as
     # out-of-sample when backtesting a strategy before you trust it live.
     backtest_oos_fraction: float = 0.30
+    # Round-trip trading friction applied to every simulated entry and exit, so
+    # backtest Sharpe/return reflect what you'd actually net. Charged per side:
+    # a fee (Coinbase Advanced Trade taker fee, ~0.4-0.6% at low volume) plus
+    # slippage (market-order fill drift). Total cost per round trip is roughly
+    # 2 x (fee + slippage). Set both to 0 for a frictionless (optimistic) run.
+    backtest_fee_pct: float = 0.005
+    backtest_slippage_pct: float = 0.0005
 
 
 settings = Settings()

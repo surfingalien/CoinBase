@@ -170,9 +170,16 @@ GET /api/validate?symbol=BTC-USD&strategy=Mean_Reversion_Master
 The response includes per-segment Sharpe, max drawdown, total return, and
 trade counts, plus an overall `PASS`/`FAIL` verdict. Backtestable strategies:
 `GainzAlgo_V2_Alpha`, `Mean_Reversion_Master`, `Ultimate_Oscillator`,
-`Turtle_Trend`. It's a deliberately simple, honest gate — long-only, one unit,
-mark-to-market, no fee/slippage model — so treat a pass as "not obviously
-broken," not a profit guarantee.
+`Turtle_Trend`.
+
+**Costs are modelled.** Every simulated entry and exit is charged
+`BACKTEST_FEE_PCT` + `BACKTEST_SLIPPAGE_PCT` per side (defaults 0.5% fee +
+0.05% slippage, ≈1.1% round trip), so the reported Sharpe/return are net of
+friction — a high-churn strategy is penalised for its turnover the way it
+would be live. The `costs` block in the response shows the exact round-trip
+figure used; set both to 0 for a frictionless (optimistic) run. It's still a
+deliberately simple gate — long-only, one unit, mark-to-market — so treat a
+pass as "not obviously broken," not a profit guarantee.
 
 ## Native technical + AI analysis (optional second signal source)
 

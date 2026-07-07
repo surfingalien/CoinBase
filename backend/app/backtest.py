@@ -127,12 +127,17 @@ BUILDERS: Dict[str, SignalBuilder] = {
 # --- Simulation & statistics ---
 
 def _simulate(closes: List[float], entries: List[bool], exits: List[bool],
-              max_hold_bars: int | None) -> Tuple[List[float], List[bool]]:
-    """Long-only mark-to-market. Returns per-bar strategy returns and a per-bar
-    flag marking the bars a new position was opened (for per-segment counting)."""
+              max_hold_bars: int | None, cost_per_side: float = 0.0) -> Tuple[List[float], List[bool]]:
+    """Long-only mark-to-market with per-side trading friction.
+
+    Returns per-bar net strategy returns and a per-bar flag marking the bars a
+    new position was opened (for per-segment trade counting). `cost_per_side`
+    (fee + slippage) is charged on every entry and every exit, so the equity
+    curve reflects what the strategy would actually net after friction."""
     n = len(closes)
     holding = [False] * n     # whether a position is held entering bar i
     opened = [False] * n
+    events = [0] * n          # cost-incurring transitions (entry/exit) on bar i
     state = False
     hold = 0
     for i in range(n):
@@ -142,15 +147,20 @@ def _simulate(closes: List[float], entries: List[bool], exits: List[bool],
             if exits[i] or (max_hold_bars is not None and hold >= max_hold_bars):
                 state = False
                 hold = 0
+                events[i] += 1   # exit costs one side
         elif entries[i]:
             state = True
             hold = 0
             opened[i] = True
+            events[i] += 1       # entry costs one side
 
     bar_returns = [0.0] * n
-    for i in range(1, n):
-        if holding[i] and closes[i - 1] > 0:
-            bar_returns[i] = closes[i] / closes[i - 1] - 1
+    for i in range(n):
+        market = (closes[i] / closes[i - 1] - 1) if (i > 0 and holding[i] and closes[i - 1] > 0) else 0.0
+        gross = 1 + market
+        for _ in range(events[i]):   # compound the friction multiplicatively
+            gross *= (1 - cost_per_side)
+        bar_returns[i] = gross - 1
     return bar_returns, opened
 
 
@@ -190,7 +200,8 @@ async def backtest(symbol: str, strategy: str) -> Dict[str, Any]:
     entries, exits, max_hold = BUILDERS[strategy](candles)
     closes = candles["closes"]
     n = len(closes)
-    bar_returns, opened = _simulate(closes, entries, exits, max_hold)
+    cost_per_side = settings.backtest_fee_pct + settings.backtest_slippage_pct
+    bar_returns, opened = _simulate(closes, entries, exits, max_hold, cost_per_side)
 
     split = int(n * (1 - settings.backtest_oos_fraction))
     full = _segment_stats(bar_returns, opened)
@@ -202,6 +213,11 @@ async def backtest(symbol: str, strategy: str) -> Dict[str, Any]:
         "strategy": strategy,
         "bars": n,
         "oos_fraction": settings.backtest_oos_fraction,
+        "costs": {
+            "fee_pct": settings.backtest_fee_pct,
+            "slippage_pct": settings.backtest_slippage_pct,
+            "round_trip_pct": round(2 * cost_per_side, 5),
+        },
         "in_sample": is_stats,
         "out_of_sample": oos_stats,
         "full_period": full,
