@@ -155,6 +155,48 @@ def compute_stoch_rsi(closes: List[float], period: int = 14) -> Optional[float]:
     return round((current - min_rsi) / (max_rsi - min_rsi) * 100, 2)
 
 
+def compute_uo_array(highs: List[float], lows: List[float], closes: List[float],
+                     s1: int = 7, s2: int = 14, s3: int = 28) -> List[float]:
+    """Ultimate Oscillator (Larry Williams) as a per-bar array, NaN until warm.
+
+    Combines buying pressure over three lookbacks (7/14/28) so it reacts to
+    short-term reversals without the whipsaw of a single-period oscillator.
+    """
+    n = len(closes)
+    if n < s3 + 1:
+        return [float("nan")] * n
+
+    bp = [float("nan")]  # buying pressure, index-aligned to closes (bar 0 undefined)
+    tr = [float("nan")]
+    for i in range(1, n):
+        low_or_pc = min(lows[i], closes[i - 1])
+        high_or_pc = max(highs[i], closes[i - 1])
+        bp.append(closes[i] - low_or_pc)
+        tr.append(high_or_pc - low_or_pc)
+
+    out = [float("nan")] * n
+    for i in range(s3, n):
+        def avg(period: int) -> float:
+            bp_sum = sum(bp[i - period + 1:i + 1])
+            tr_sum = sum(tr[i - period + 1:i + 1])
+            return bp_sum / tr_sum if tr_sum else 0.0
+
+        out[i] = 100 * (4 * avg(s1) + 2 * avg(s2) + avg(s3)) / 7
+    return out
+
+
+def compute_ultimate_oscillator(highs: List[float], lows: List[float], closes: List[float],
+                                s1: int = 7, s2: int = 14, s3: int = 28) -> Optional[Dict[str, Any]]:
+    """Latest Ultimate Oscillator value plus the prior bar's, so callers can
+    detect a fresh cross up out of oversold territory (the entry trigger)."""
+    arr = compute_uo_array(highs, lows, closes, s1, s2, s3)
+    if not arr or math.isnan(arr[-1]):
+        return None
+    current = round(arr[-1], 2)
+    prev = round(arr[-2], 2) if len(arr) >= 2 and not math.isnan(arr[-2]) else None
+    return {"uo": current, "prev": prev}
+
+
 def compute_vwap(highs: List[float], lows: List[float], closes: List[float], volumes: List[float]) -> Optional[float]:
     if not highs:
         return None
@@ -369,6 +411,7 @@ def compute_all(opens: List[float], highs: List[float], lows: List[float],
         "bb": compute_bb(closes),
         "atr": compute_atr(highs, lows, closes),
         "stoch_rsi": compute_stoch_rsi(closes),
+        "uo": compute_ultimate_oscillator(highs, lows, closes),
         "vwap": compute_vwap(highs, lows, closes, volumes),
         "obv": compute_obv(closes, volumes),
         "sr": find_support_resistance(highs, lows, closes),

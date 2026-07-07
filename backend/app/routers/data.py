@@ -357,6 +357,28 @@ async def diagnostics():
     return out
 
 
+@router.get("/momentum/rankings")
+async def momentum_rankings():
+    """Cross-sectional momentum ranking of the whole universe (12-1 style
+    score). Read-only — this shows the ranking the monthly rebalancer would
+    trade; it never places an order itself."""
+    from app import cross_sectional
+
+    return await cross_sectional.compute_rankings()
+
+
+@router.get("/validate")
+async def validate_strategy(symbol: str = "BTC-USD", strategy: str = "Mean_Reversion_Master"):
+    """Pre-deploy validation: backtest `strategy` on `symbol` over daily
+    candles and return the six pass/fail checks (OOS Sharpe, max drawdown,
+    overfit ratio, trade count, ...) with the actual numbers behind each."""
+    from app import backtest
+
+    if symbol not in ALLOWED_PAIRS:
+        raise HTTPException(status_code=400, detail=f"{symbol} is not in the allowed universe.")
+    return await backtest.validate(symbol, strategy)
+
+
 @router.get("/config")
 async def get_config():
     """A safe (no secrets) snapshot of the risk/system configuration, plus
