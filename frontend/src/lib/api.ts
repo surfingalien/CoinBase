@@ -97,6 +97,13 @@ export interface Config {
     enabled: boolean;
     cache_minutes: number;
   };
+  cross_sectional: {
+    enabled: boolean;
+    top_pct: number;
+    rebalance_day: number;
+    lookback_days: number;
+    skip_days: number;
+  };
 }
 
 export interface ValidationSegment {

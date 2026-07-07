@@ -429,4 +429,13 @@ async def get_config():
             "enabled": settings.sentiment_enabled,
             "cache_minutes": settings.sentiment_cache_minutes,
         },
+        "cross_sectional": {
+            # The only new feature that can open positions on its own. Surfaced
+            # so its armed/disarmed state is visible on the dashboard.
+            "enabled": settings.cross_sectional_enabled,
+            "top_pct": settings.momentum_top_pct,
+            "rebalance_day": settings.momentum_rebalance_day,
+            "lookback_days": settings.momentum_lookback_days,
+            "skip_days": settings.momentum_skip_days,
+        },
     }

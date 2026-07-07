@@ -869,6 +869,37 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
         </div>
       </SectionCard>
 
+      {config.cross_sectional && (
+        <SectionCard title="Cross-Sectional Rebalancer" icon={RefreshCw} badge={
+          config.cross_sectional.enabled
+            ? <Badge variant="danger"><Zap className="h-3 w-3" />ARMED — auto-trades</Badge>
+            : <Badge variant="success"><CheckCircle2 className="h-3 w-3" />OFF — no auto-trades</Badge>
+        }>
+          <div className="p-5 space-y-3">
+            <p className="text-xs text-foreground-muted leading-relaxed">
+              {config.cross_sectional.enabled ? (
+                <>
+                  <span className="font-semibold text-danger">This is armed.</span> On day{" "}
+                  {config.cross_sectional.rebalance_day} of each month it opens new positions in the
+                  top {(config.cross_sectional.top_pct * 100).toFixed(0)}% momentum leaders — the only
+                  feature that places trades on its own. It never sells your existing holdings.
+                </>
+              ) : (
+                <>
+                  The monthly momentum rebalancer is <span className="font-semibold text-foreground">off</span>.
+                  It places no trades. The <span className="font-semibold text-foreground">Validation</span> tab
+                  and momentum ranking stay available read-only. To arm it, set{" "}
+                  <span className="font-mono text-foreground">CROSS_SECTIONAL_ENABLED=true</span> and restart.
+                </>
+              )}
+            </p>
+            <StatRow label="Rebalance day (UTC)" value={config.cross_sectional.rebalance_day} />
+            <StatRow label="Long bucket" value={`Top ${(config.cross_sectional.top_pct * 100).toFixed(0)}%`} />
+            <StatRow label="Momentum window" value={`${config.cross_sectional.lookback_days}d − ${config.cross_sectional.skip_days}d skip`} />
+          </div>
+        </SectionCard>
+      )}
+
       <SectionCard title="Allowed Pairs" icon={Wallet}>
         <div className="p-5 flex flex-wrap gap-2">
           {config.allowed_pairs.map((pair) => <Badge key={pair}>{pair}</Badge>)}
