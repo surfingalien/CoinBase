@@ -99,6 +99,45 @@ export interface Config {
   };
 }
 
+export interface ValidationSegment {
+  sharpe: number;
+  max_drawdown: number;
+  total_return: number;
+  trades: number;
+  bars: number;
+}
+
+export interface ValidationCheck {
+  name: string;
+  value: number;
+  pass: boolean;
+  threshold?: number;
+}
+
+export interface ValidationResult {
+  symbol: string;
+  strategy: string;
+  bars: number;
+  oos_fraction: number;
+  costs: { fee_pct: number; slippage_pct: number; round_trip_pct: number };
+  in_sample: ValidationSegment;
+  out_of_sample: ValidationSegment;
+  full_period: ValidationSegment;
+  checks: ValidationCheck[];
+  verdict: "PASS" | "FAIL";
+  passed: number;
+  total_checks: number;
+  error?: string;
+}
+
+// Strategies backtest.py can validate (mirrors backend BUILDERS).
+export const BACKTESTABLE_STRATEGIES = [
+  "GainzAlgo_V2_Alpha",
+  "Mean_Reversion_Master",
+  "Ultimate_Oscillator",
+  "Turtle_Trend",
+] as const;
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
@@ -124,6 +163,8 @@ export const api = {
   stats: () => getJSON<Stats>("/api/stats"),
   positionHistory: () => getJSON<ClosedPosition[]>("/api/positions/history"),
   config: () => getJSON<Config>("/api/config"),
+  validate: (symbol: string, strategy: string) =>
+    getJSON<ValidationResult>(`/api/validate?symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}`),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
   syncHoldings: () => postJSON<{
     synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
