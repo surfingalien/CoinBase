@@ -1,0 +1,40 @@
+//@version=5
+// Turtle Trend — Donchian Breakout Trend Following (System 1)
+// Enter long on a 20-day high breakout; exit on a 10-day low breakdown.
+// Position risk is defined by a 2N (2*ATR) stop, sent to the GainzAI backend
+// so server-side sizing scales the position to constant per-trade risk.
+strategy("Turtle Trend", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=4)
+
+entryLen   = input.int(20, "Entry Breakout (days)")
+exitLen    = input.int(10, "Exit Breakdown (days)")
+atrLen     = input.int(20, "ATR (N) Length")
+stopMult   = input.float(2.0, "Initial Stop (N multiple)")
+webhookSec = input.string("change_me_to_a_long_random_string", "Webhook Secret", group="Webhook")
+
+// [1] on the channels excludes the current bar so the breakout is vs. the
+// prior N-day extreme, the classic Turtle definition.
+entryHigh = ta.highest(high, entryLen)[1]
+exitLow   = ta.lowest(low, exitLen)[1]
+nValue    = ta.atr(atrLen)  // N = ATR, the Turtle volatility unit
+
+inTrade  = strategy.position_size > 0
+buyCond  = not inTrade and close > entryHigh
+sellCond = inTrade and close < exitLow
+
+payload(action) =>
+    '{"webhook_secret":"' + webhookSec + '","strategy":"Turtle_Trend","symbol":"' + syminfo.ticker +
+     '-USD","action":"' + action + '","price":' + str.tostring(close) + ',"atr":' + str.tostring(nValue) +
+     ',"stop_mult":' + str.tostring(stopMult) + ',"entry_high":' + str.tostring(entryHigh) +
+     ',"exit_low":' + str.tostring(exitLow) + '}'
+
+if buyCond
+    strategy.entry("Turtle Long", strategy.long)
+    alert(payload("BUY"), alert.freq_once_per_bar_close)
+if sellCond
+    strategy.close("Turtle Long")
+    alert(payload("SELL"), alert.freq_once_per_bar_close)
+
+plot(entryHigh, color=color.green, title="20d High (entry)")
+plot(exitLow, color=color.red, title="10d Low (exit)")
+plotshape(buyCond, title="Buy", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sellCond, title="Sell", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)

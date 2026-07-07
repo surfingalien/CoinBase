@@ -47,18 +47,22 @@ backend/         FastAPI app (paper + live trading engine)
     risk.py         position sizing and hard risk caps
     trading.py      the webhook → decision → order pipeline
     position_monitor.py  background loop: auto take-profit / stop-loss exits
-    technical_indicators.py  RSI/MACD/EMA/BB/ATR/ADX/support-resistance/pattern math
+    technical_indicators.py  RSI/MACD/EMA/BB/ATR/UO/ADX/support-resistance/pattern math
     market_data.py         fetches OHLCV candles from Coinbase's public API
     market_analysis.py     turns indicators into a signal (Claude, or rule-based fallback)
     market_analysis_monitor.py  background loop: analyzes every pair on a schedule
+    cross_sectional.py     ranks the whole universe by 12-1 relative-strength momentum
+    cross_sectional_monitor.py  background loop: opt-in monthly momentum rebalance
+    backtest.py            pre-deploy validation: IS/OOS Sharpe, drawdown, overfit checks
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats,
-                    /api/positions/history, /api/config; POST /api/reset
+                    /api/positions/history, /api/momentum/rankings, /api/validate,
+                    /api/config; POST /api/reset
     main.py         FastAPI app wiring
 frontend/        React + Vite + Tailwind dashboard (Dashboard / Portfolio /
                  Signals / Risk Manager / Settings tabs, all live-data)
-pinescript/      5 TradingView strategies (Pine Script v5)
+pinescript/      7 TradingView strategies (Pine Script v5)
 website/         Standalone premium marketing landing page (index.html)
 ```
 
@@ -103,8 +107,79 @@ backend on port 8000.
    backend `.env`.
 3. Create a TradingView alert on the strategy, and set the webhook URL to
    `https://<your-domain>/webhook/tradingview`.
-4. Repeat per pair/timeframe. The backend accepts alerts from all five
-   strategies concurrently — `ai_engine.py` routes each by its `strategy` field.
+4. Repeat per pair/timeframe. The backend accepts alerts from all seven
+   webhook strategies concurrently — `ai_engine.py` routes each by its
+   `strategy` field.
+
+## Strategy library
+
+Each Pine script fires a webhook tagged with a `strategy` name; `ai_engine.py`
+has a matching confirmation block that re-checks the indicators server-side
+before any order. The bundled strategies:
+
+| # | Pine file | `strategy` tag | Style |
+|---|-----------|----------------|-------|
+| 1 | `1_gainzalgo_v2_alpha.pine` | `GainzAlgo_V2_Alpha` | EMA-stack + MACD + RSI trend confluence |
+| 2 | `2_mean_reversion_master.pine` | `Mean_Reversion_Master` | BB + RSI oversold bounce, **filtered to only buy dips above the 200 EMA** |
+| 3 | `3_breakout_hunter.pine` | `Breakout_Hunter` | Donchian breakout on a volume surge |
+| 4 | `4_vwap_bounce_bot.pine` | `VWAP_Bounce_Bot` | Pullback to VWAP in an uptrend |
+| 5 | `5_scalp_momentum.pine` | `Scalp_Momentum` | MACD-histogram flip, choppiness-filtered |
+| 6 | `6_ultimate_oscillator.pine` | `Ultimate_Oscillator` | UO(7/14/28) cross up through 30; exit at 70 or after 5 candles |
+| 7 | `7_turtle_trend.pine` | `Turtle_Trend` | 20-day-high breakout / 10-day-low exit, sized to a 2N (2·ATR) stop |
+
+Two more strategies run **without** TradingView:
+
+- **`Native_TA_AI`** — the built-in analysis loop (see below).
+- **`Cross_Sectional_Momentum`** — a portfolio-level strategy that ranks the
+  whole universe against itself rather than judging one symbol at a time.
+
+### Cross-sectional momentum (`Cross_Sectional_Momentum`)
+
+`cross_sectional.py` ranks every pair in `ALLOWED_PAIRS` by a 12-1 style
+momentum score — the return from `MOMENTUM_LOOKBACK_DAYS` ago up to
+`MOMENTUM_SKIP_DAYS` ago, skipping the most recent month whose short-term
+reversal is noise — and flags the top `MOMENTUM_TOP_PCT` as the long bucket.
+The ranking is always readable at **`GET /api/momentum/rankings`** (read-only,
+never trades). The monthly rebalancer that actually opens the top-bucket longs
+is **off by default**; set `CROSS_SECTIONAL_ENABLED=true` to arm it. It fires
+once per month on `MOMENTUM_REBALANCE_DAY` (UTC) through the same
+`process_signal` pipeline as every other strategy. (Daily candles from
+Coinbase's public endpoint cap at ~300 bars, so a >300-day lookback is clamped
+to available history — every symbol is clamped identically, so the ranking
+stays apples-to-apples.)
+
+## Pre-deploy validation (`GET /api/validate`)
+
+Before you trust a strategy with real money, stress-test it:
+`backtest.py` runs the strategy's entry/exit rules over Coinbase daily candles,
+splits the history into in-sample (IS) and out-of-sample (OOS, the last
+`BACKTEST_OOS_FRACTION`), and returns the six checks that catch an overfit
+backtest — each with the actual number behind it:
+
+```
+GET /api/validate?symbol=BTC-USD&strategy=Mean_Reversion_Master
+```
+
+1. OOS Sharpe > 0.5
+2. Max drawdown better than -35%
+3. OOS Sharpe < 2.5 (a suspiciously high Sharpe usually means a bug or overfit)
+4. OOS ≤ IS × 1.3 + 0.5 (OOS shouldn't wildly exceed in-sample)
+5. At least 30 trades (enough sample size to trust the stats)
+6. IS Sharpe > 0
+
+The response includes per-segment Sharpe, max drawdown, total return, and
+trade counts, plus an overall `PASS`/`FAIL` verdict. Backtestable strategies:
+`GainzAlgo_V2_Alpha`, `Mean_Reversion_Master`, `Ultimate_Oscillator`,
+`Turtle_Trend`.
+
+**Costs are modelled.** Every simulated entry and exit is charged
+`BACKTEST_FEE_PCT` + `BACKTEST_SLIPPAGE_PCT` per side (defaults 0.5% fee +
+0.05% slippage, ≈1.1% round trip), so the reported Sharpe/return are net of
+friction — a high-churn strategy is penalised for its turnover the way it
+would be live. The `costs` block in the response shows the exact round-trip
+figure used; set both to 0 for a frictionless (optimistic) run. It's still a
+deliberately simple gate — long-only, one unit, mark-to-market — so treat a
+pass as "not obviously broken," not a profit guarantee.
 
 ## Native technical + AI analysis (optional second signal source)
 

@@ -67,6 +67,34 @@ class Settings(BaseSettings):
     # before deciding. Has no effect if anthropic_api_key is unset.
     enable_web_research: bool = True
 
+    # Cross-sectional momentum: ranks the whole ALLOWED_PAIRS universe by a
+    # 12-1 style momentum score (return from `momentum_lookback_days` ago to
+    # `momentum_skip_days` ago, skipping the most recent month to avoid
+    # short-term reversal) and goes long the top `momentum_top_pct`. The
+    # ranking API (/api/momentum/rankings) is always available; the automatic
+    # monthly rebalancer that actually places trades stays OFF unless you set
+    # cross_sectional_enabled=true, since it opens real positions.
+    cross_sectional_enabled: bool = False
+    momentum_lookback_days: int = 330
+    momentum_skip_days: int = 30
+    momentum_top_pct: float = 0.20
+    # Day of month (UTC) the rebalancer fires on when enabled.
+    momentum_rebalance_day: int = 1
+    # How often the rebalancer wakes to check the date (default 6h). It only
+    # acts once on momentum_rebalance_day each month, regardless of interval.
+    cross_sectional_check_interval_seconds: int = 21600
+
+    # Validation harness (/api/validate): the fraction of history held out as
+    # out-of-sample when backtesting a strategy before you trust it live.
+    backtest_oos_fraction: float = 0.30
+    # Round-trip trading friction applied to every simulated entry and exit, so
+    # backtest Sharpe/return reflect what you'd actually net. Charged per side:
+    # a fee (Coinbase Advanced Trade taker fee, ~0.4-0.6% at low volume) plus
+    # slippage (market-order fill drift). Total cost per round trip is roughly
+    # 2 x (fee + slippage). Set both to 0 for a frictionless (optimistic) run.
+    backtest_fee_pct: float = 0.005
+    backtest_slippage_pct: float = 0.0005
+
 
 settings = Settings()
 
@@ -93,4 +121,7 @@ KNOWN_STRATEGIES = {
     "VWAP_Bounce_Bot",
     "Scalp_Momentum",
     "Native_TA_AI",
+    "Ultimate_Oscillator",
+    "Turtle_Trend",
+    "Cross_Sectional_Momentum",
 }

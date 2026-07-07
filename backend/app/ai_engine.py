@@ -43,10 +43,27 @@ class AIEngine:
                 reasoning = f"Bearish MACD cross with RSI ({rsi:.1f}) confirming downside momentum."
 
         elif strategy == "Mean_Reversion_Master":
-            if action == "BUY" and rsi < 35:
-                decision, confidence = "EXECUTE", 0.75
-                reasoning = f"Price pierced lower Bollinger Band with RSI ({rsi:.1f}) oversold — high probability bounce."
+            # Trend-filtered mean reversion: only buy oversold dips that are
+            # still above the 200 EMA, so we're fading pullbacks *within* an
+            # uptrend rather than catching a falling knife in a downtrend.
+            # ema_200 is optional for backward compatibility — a payload
+            # without it falls back to the original band+RSI logic.
+            ema_200 = signal_data.get("ema_200")
+            price = float(signal_data.get("price") or 0)
+            above_trend = ema_200 is None or (price > 0 and price >= float(ema_200))
+            if action == "BUY" and rsi < 35 and above_trend:
+                decision, confidence = "EXECUTE", 0.78 if ema_200 is not None else 0.75
+                trend_note = " above the 200 EMA (uptrend intact)" if ema_200 is not None else ""
+                reasoning = (
+                    f"Price pierced lower Bollinger Band with RSI ({rsi:.1f}) oversold{trend_note} — "
+                    "high-probability bounce."
+                )
                 size_multiplier = 0.8
+            elif action == "BUY" and rsi < 35 and not above_trend:
+                reasoning = (
+                    f"Oversold RSI ({rsi:.1f}) but price is below the 200 EMA — skipping the dip-buy "
+                    "to avoid fading a downtrend."
+                )
 
         elif strategy == "Breakout_Hunter":
             if action == "BUY" and signal_data.get("volume_ratio", 1.0) >= 1.3:
@@ -64,6 +81,73 @@ class AIEngine:
                 decision, confidence = "EXECUTE", 0.70
                 reasoning = "MACD histogram flipped positive in trend direction — short-duration momentum scalp."
                 size_multiplier = 0.5
+
+        elif strategy == "Ultimate_Oscillator":
+            # Entry is a fresh cross up out of oversold: UO now above 30 having
+            # been at/below it on the prior bar. Re-derive the cross from the
+            # payload's uo/uo_prev rather than trusting the alert's word for it.
+            uo = signal_data.get("uo")
+            uo_prev = signal_data.get("uo_prev")
+            if action == "BUY" and uo is not None:
+                uo = float(uo)
+                crossed_up = uo_prev is None or (float(uo_prev) <= 30 < uo)
+                if 30 < uo < 55 and crossed_up:
+                    decision, confidence = "EXECUTE", 0.79
+                    reasoning = (
+                        f"Ultimate Oscillator crossed up through 30 (now {uo:.1f}) out of oversold — "
+                        "multi-timeframe buying pressure turning up."
+                    )
+                    size_multiplier = 0.8
+                else:
+                    reasoning = (
+                        f"Ultimate Oscillator at {uo:.1f} is not a fresh oversold cross "
+                        "(need a cross up through 30, below 55) — standing aside."
+                    )
+
+        elif strategy == "Turtle_Trend":
+            # Turtle System 1: enter on a 20-day high breakout, risk a fixed
+            # fraction of the account per trade by scaling position size to
+            # volatility. A 2N (2*ATR) initial stop defines the risk; position
+            # size is scaled inversely to the ATR-implied stop distance so a
+            # wide-range breakout takes a smaller position than a tight one —
+            # the constant-risk-per-unit core of the Turtle rules.
+            atr = signal_data.get("atr")
+            price = float(signal_data.get("price") or 0)
+            if action == "BUY" and atr and price > 0:
+                atr = float(atr)
+                stop_distance_pct = (2 * atr) / price  # 2N stop as a fraction of price
+                # Reference risk band ~4%: tighter stops size up, wider stops
+                # size down, clamped so one setup can't dominate the book.
+                size_multiplier = max(0.25, min(1.5, 0.04 / stop_distance_pct)) if stop_distance_pct else 1.0
+                # Hand the monitor an explicit 2N stop so the exit matches the
+                # sizing assumption instead of the global stop-loss percentage.
+                signal_data.setdefault("ta_stop_loss", round(price - 2 * atr, 8))
+                decision, confidence = "EXECUTE", 0.77
+                reasoning = (
+                    f"20-day high breakout. Sizing to a 2N stop (2*ATR={2*atr:.4g}, "
+                    f"{stop_distance_pct:.1%} of price) for constant per-trade risk."
+                )
+            elif action == "SELL":
+                # 10-day low breakdown — Turtle System 1 exit.
+                decision, confidence = "EXECUTE", 0.77
+                reasoning = "10-day low breakdown — Turtle trend exit."
+
+        elif strategy == "Cross_Sectional_Momentum":
+            # The ranking is computed upstream in cross_sectional.py; the
+            # payload carries this symbol's rank so the engine just confirms
+            # it's in the long bucket and scales confidence by rank strength.
+            in_long_bucket = bool(signal_data.get("in_long_bucket"))
+            rank = signal_data.get("rank")
+            total = signal_data.get("universe_size")
+            mom = signal_data.get("momentum_score")
+            if action == "BUY" and in_long_bucket:
+                decision, confidence = "EXECUTE", 0.72
+                where = f" (rank {rank}/{total})" if rank and total else ""
+                mom_note = f", 12-1 momentum {mom:+.1%}" if isinstance(mom, (int, float)) else ""
+                reasoning = f"Top cross-sectional momentum{where}{mom_note} — long the relative-strength leaders."
+            elif action == "SELL":
+                decision, confidence = "EXECUTE", 0.72
+                reasoning = "Dropped out of the top momentum bucket at rebalance — rotating out."
 
         elif strategy == "Native_TA_AI":
             # market_analysis.py already ran the full technical (+ optional

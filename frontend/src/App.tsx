@@ -2,10 +2,13 @@ import { useEffect, useState } from "react";
 import {
   Bot, LayoutDashboard, Wallet, Activity, Settings as SettingsIcon, Shield, RefreshCw,
   TrendingUp, TrendingDown, Briefcase, Zap, Brain, Sparkles, CheckCircle2, XCircle, AlertTriangle, Trash2,
-  Menu, X,
+  Menu, X, FlaskConical,
 } from "lucide-react";
 import { cn, formatCurrency, formatRelativeTime } from "@/lib/utils";
-import { api, type ClosedPosition, type Config, type Order, type Portfolio, type Signal, type Stats } from "@/lib/api";
+import {
+  api, BACKTESTABLE_STRATEGIES,
+  type ClosedPosition, type Config, type Order, type Portfolio, type Signal, type Stats, type ValidationResult,
+} from "@/lib/api";
 
 const Card = ({ children, className }: { children: React.ReactNode; className?: string }) => (
   <div className={cn("rounded-2xl border border-border bg-surface transition-all duration-300", className)}>{children}</div>
@@ -47,6 +50,7 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "portfolio", label: "Portfolio", icon: Wallet },
   { id: "signals", label: "Signals", icon: Activity },
+  { id: "validation", label: "Validation", icon: FlaskConical },
   { id: "risk", label: "Risk Manager", icon: Shield },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ] as const;
@@ -57,6 +61,7 @@ const TAB_TITLES: Record<TabId, string> = {
   dashboard: "Dashboard",
   portfolio: "Portfolio",
   signals: "Signals",
+  validation: "Strategy Validation",
   risk: "Risk Manager",
   settings: "Settings",
 };
@@ -228,6 +233,9 @@ export default function App() {
             )}
             {activeTab === "signals" && (
               <SignalsTab isLoading={isLoading} signals={signals} />
+            )}
+            {activeTab === "validation" && (
+              <ValidationTab config={config} />
             )}
             {activeTab === "risk" && (
               <RiskTab isLoading={isLoading} config={config} />
@@ -539,6 +547,149 @@ const StatRow = ({ label, value }: { label: string; value: React.ReactNode }) =>
   </div>
 );
 
+const STRATEGY_LABELS: Record<string, string> = {
+  GainzAlgo_V2_Alpha: "GainzAlgo V2 Alpha",
+  Mean_Reversion_Master: "Mean Reversion Master",
+  Ultimate_Oscillator: "Ultimate Oscillator",
+  Turtle_Trend: "Turtle Trend",
+};
+
+function SegmentStats({ title, seg }: { title: string; seg: ValidationResult["in_sample"] }) {
+  return (
+    <div className="rounded-xl border border-border bg-surface-raised/40 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wider text-foreground-muted mb-3">{title}</p>
+      <div className="space-y-2">
+        <div className="flex justify-between text-xs"><span className="text-foreground-muted">Sharpe</span><span className="font-mono font-semibold">{seg.sharpe.toFixed(2)}</span></div>
+        <div className="flex justify-between text-xs"><span className="text-foreground-muted">Max drawdown</span><span className={cn("font-mono font-semibold", seg.max_drawdown < -0.35 ? "text-danger" : "text-foreground")}>{(seg.max_drawdown * 100).toFixed(1)}%</span></div>
+        <div className="flex justify-between text-xs"><span className="text-foreground-muted">Total return</span><span className={cn("font-mono font-semibold", seg.total_return >= 0 ? "text-success" : "text-danger")}>{(seg.total_return * 100).toFixed(1)}%</span></div>
+        <div className="flex justify-between text-xs"><span className="text-foreground-muted">Trades</span><span className="font-mono font-semibold">{seg.trades}</span></div>
+      </div>
+    </div>
+  );
+}
+
+function ValidationTab({ config }: { config: Config | null }) {
+  const pairs = config?.allowed_pairs ?? ["BTC-USD"];
+  const [symbol, setSymbol] = useState("BTC-USD");
+  const [strategy, setStrategy] = useState<string>(BACKTESTABLE_STRATEGIES[1]);
+  const [result, setResult] = useState<ValidationResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setErr(null);
+    try {
+      const r = await api.validate(symbol, strategy);
+      if (r.error) { setErr(r.error); setResult(null); }
+      else setResult(r);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Validation failed.");
+      setResult(null);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <SectionCard title="Pre-Deploy Validation" icon={FlaskConical} badge={<Badge variant="primary">Backtest gate</Badge>}>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-foreground-muted leading-relaxed">
+            Backtests a strategy over Coinbase daily candles, splits the history into in-sample and
+            out-of-sample, and scores it against six pre-deploy checks — net of modelled fees and
+            slippage. A <span className="font-semibold text-foreground">PASS</span> means "not obviously
+            broken," not a profit guarantee. Use it to <span className="font-semibold text-foreground">reject</span> overfit or high-churn strategies before risking real money.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground-muted">Symbol</span>
+              <select
+                value={symbol}
+                onChange={(e) => setSymbol(e.target.value)}
+                className="rounded-xl border border-border bg-surface-raised px-3 py-2 text-sm font-medium focus:border-primary focus:outline-none"
+              >
+                {pairs.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground-muted">Strategy</span>
+              <select
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value)}
+                className="rounded-xl border border-border bg-surface-raised px-3 py-2 text-sm font-medium focus:border-primary focus:outline-none"
+              >
+                {BACKTESTABLE_STRATEGIES.map((s) => <option key={s} value={s}>{STRATEGY_LABELS[s] ?? s}</option>)}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={run}
+              disabled={running}
+              className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary/90 transition-all disabled:opacity-50"
+            >
+              <FlaskConical className={cn("h-4 w-4", running && "animate-pulse")} />
+              {running ? "Running…" : "Run validation"}
+            </button>
+          </div>
+          {err && (
+            <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" /><span>{err}</span>
+            </div>
+          )}
+        </div>
+      </SectionCard>
+
+      {result && (
+        <>
+          <Card className={cn("glass relative overflow-hidden p-6 animate-slide-up border-2", result.verdict === "PASS" ? "border-success/40" : "border-danger/40")}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div className={cn("flex h-14 w-14 items-center justify-center rounded-2xl", result.verdict === "PASS" ? "bg-success/15" : "bg-danger/15")}>
+                  {result.verdict === "PASS" ? <CheckCircle2 className="h-7 w-7 text-success" /> : <XCircle className="h-7 w-7 text-danger" />}
+                </div>
+                <div>
+                  <p className={cn("text-2xl font-bold tracking-tight", result.verdict === "PASS" ? "text-success" : "text-danger")}>{result.verdict}</p>
+                  <p className="text-xs text-foreground-muted mt-0.5">
+                    {STRATEGY_LABELS[result.strategy] ?? result.strategy} on {result.symbol} — {result.passed}/{result.total_checks} checks passed
+                  </p>
+                </div>
+              </div>
+              <div className="text-right text-xs text-foreground-muted">
+                <p>{result.bars} daily candles · {(result.oos_fraction * 100).toFixed(0)}% held out</p>
+                <p className="mt-0.5">Round-trip cost modelled: {(result.costs.round_trip_pct * 100).toFixed(2)}%</p>
+              </div>
+            </div>
+          </Card>
+
+          <SectionCard title="Pre-Deploy Checks" icon={Shield} badge={<Badge variant={result.verdict === "PASS" ? "success" : "danger"}>{result.passed}/{result.total_checks}</Badge>}>
+            <div className="divide-y divide-border">
+              {result.checks.map((c) => (
+                <div key={c.name} className="flex items-center justify-between gap-4 px-5 py-3">
+                  <div className="flex items-center gap-2.5">
+                    {c.pass ? <CheckCircle2 className="h-4 w-4 shrink-0 text-success" /> : <XCircle className="h-4 w-4 shrink-0 text-danger" />}
+                    <span className="text-sm">{c.name}</span>
+                  </div>
+                  <span className={cn("text-sm font-mono font-semibold", c.pass ? "text-success" : "text-danger")}>
+                    {typeof c.value === "number" ? (Number.isInteger(c.value) ? c.value : c.value.toFixed(2)) : c.value}
+                    {c.threshold != null && <span className="text-foreground-subtle"> / {c.threshold.toFixed(2)}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </SectionCard>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <SegmentStats title="In-sample" seg={result.in_sample} />
+            <SegmentStats title="Out-of-sample" seg={result.out_of_sample} />
+            <SegmentStats title="Full period" seg={result.full_period} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RiskTab({ isLoading, config }: { isLoading: boolean; config: Config | null }) {
   if (isLoading && !config) {
     return <Card className="glass p-8 space-y-4"><Skeleton className="h-4 w-32" /><Skeleton className="h-32 w-full" /></Card>;
@@ -717,6 +868,37 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
           <StatRow label="Cache duration" value={`${config.sentiment.cache_minutes} min`} />
         </div>
       </SectionCard>
+
+      {config.cross_sectional && (
+        <SectionCard title="Cross-Sectional Rebalancer" icon={RefreshCw} badge={
+          config.cross_sectional.enabled
+            ? <Badge variant="danger"><Zap className="h-3 w-3" />ARMED — auto-trades</Badge>
+            : <Badge variant="success"><CheckCircle2 className="h-3 w-3" />OFF — no auto-trades</Badge>
+        }>
+          <div className="p-5 space-y-3">
+            <p className="text-xs text-foreground-muted leading-relaxed">
+              {config.cross_sectional.enabled ? (
+                <>
+                  <span className="font-semibold text-danger">This is armed.</span> On day{" "}
+                  {config.cross_sectional.rebalance_day} of each month it opens new positions in the
+                  top {(config.cross_sectional.top_pct * 100).toFixed(0)}% momentum leaders — the only
+                  feature that places trades on its own. It never sells your existing holdings.
+                </>
+              ) : (
+                <>
+                  The monthly momentum rebalancer is <span className="font-semibold text-foreground">off</span>.
+                  It places no trades. The <span className="font-semibold text-foreground">Validation</span> tab
+                  and momentum ranking stay available read-only. To arm it, set{" "}
+                  <span className="font-mono text-foreground">CROSS_SECTIONAL_ENABLED=true</span> and restart.
+                </>
+              )}
+            </p>
+            <StatRow label="Rebalance day (UTC)" value={config.cross_sectional.rebalance_day} />
+            <StatRow label="Long bucket" value={`Top ${(config.cross_sectional.top_pct * 100).toFixed(0)}%`} />
+            <StatRow label="Momentum window" value={`${config.cross_sectional.lookback_days}d − ${config.cross_sectional.skip_days}d skip`} />
+          </div>
+        </SectionCard>
+      )}
 
       <SectionCard title="Allowed Pairs" icon={Wallet}>
         <div className="p-5 flex flex-wrap gap-2">
