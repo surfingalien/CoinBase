@@ -255,15 +255,30 @@ async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
     if research_enabled:
         max_tokens += 100  # headroom for the model's research/tool-use turn
 
-    kwargs: Dict[str, Any] = dict(
-        model=settings.anthropic_model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": _batch_prompt(candidates, sentiment_block, research_enabled)}],
-    )
-    if research_enabled:
-        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+    content = _batch_prompt(candidates, sentiment_block, research_enabled)
 
-    response = await client.messages.create(**kwargs)
+    async def _call(with_tools: bool):
+        kwargs: Dict[str, Any] = dict(
+            model=settings.anthropic_model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": content}],
+        )
+        if with_tools:
+            kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+        return await client.messages.create(**kwargs)
+
+    try:
+        response = await _call(with_tools=research_enabled)
+    except Exception:
+        # If the web_search tool call itself failed (unavailable on the plan/SDK,
+        # transient tool error), don't lose the whole cycle to the rule-based
+        # fallback — retry once WITHOUT tools so Claude still weighs the setups
+        # on technicals + cached sentiment. Mirrors run_ai_selftest's isolation.
+        if not research_enabled:
+            raise
+        logger.warning("Batched Claude call failed with web_search; retrying without it")
+        response = await _call(with_tools=False)
+
     raw_text = "".join(block.text for block in response.content if block.type == "text")
     return _parse_batch_response(raw_text)
 
