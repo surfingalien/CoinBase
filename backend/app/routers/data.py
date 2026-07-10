@@ -23,6 +23,10 @@ async def get_portfolio():
     try:
         exchange = get_exchange()
         usd_balance = await exchange.get_usd_balance()
+        # True account value from Coinbase (cash + ALL crypto at market),
+        # so the top-line total matches the real account even for holdings
+        # that were never synced as tracked positions.
+        account_value = await exchange.get_account_value()
     except Exception as exc:
         raise _exchange_error(exc) from exc
 
@@ -60,9 +64,14 @@ async def get_portfolio():
                 "unrealized_pnl": unrealized_pnl,
             })
 
+        # Prefer the real account NAV; fall back to cash + tracked positions
+        # if the account-value call returned nothing (e.g. paper with no ledger).
+        total_value = account_value or (usd_balance + position_value)
         return {
-            "total_value": usd_balance + position_value,
+            "total_value": total_value,
             "usd_balance": usd_balance,
+            "tracked_position_value": position_value,
+            "untracked_value": max(0.0, total_value - usd_balance - position_value),
             "trading_budget_usd": settings.trading_budget_usd or None,
             "open_positions": len(positions),
             "is_live": exchange.is_live,

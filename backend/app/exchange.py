@@ -172,6 +172,8 @@ class Exchange(Protocol):
 
     async def get_usd_balance(self) -> float: ...
 
+    async def get_account_value(self) -> float: ...
+
 
 # Only used when Coinbase's public ticker is unreachable (e.g. offline dev).
 _FALLBACK_PRICES = {
@@ -214,6 +216,14 @@ class MockExchange:
 
     async def get_usd_balance(self) -> float:
         return self.usd_balance
+
+    async def get_account_value(self) -> float:
+        """Paper account NAV: cash + every held asset marked to market."""
+        total = self.usd_balance
+        for symbol, amount in self.holdings.items():
+            if amount > 0:
+                total += amount * await self.get_price(symbol)
+        return total
 
     async def place_market_order(
         self, symbol: str, side: str,
@@ -297,6 +307,34 @@ class CoinbaseExchange:
                     total += float(account["available_balance"]["value"])
                 except (KeyError, TypeError, ValueError):
                     continue
+        return total
+
+    async def get_account_value(self) -> float:
+        """True account NAV in USD: cash (USD+USDC) plus every crypto balance
+        marked to its current price — so the dashboard total matches the real
+        Coinbase account, independent of which holdings are synced/tracked.
+        Assets with no -USD market (or an unfetchable price) are skipped."""
+        try:
+            accounts = self._client.get_accounts(limit=250)
+        except Exception as exc:
+            raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
+
+        total = 0.0
+        for account in accounts.get("accounts", []):
+            currency = account.get("currency")
+            try:
+                amount = float(account["available_balance"]["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if amount <= 0:
+                continue
+            if currency in ("USD", "USDC"):
+                total += amount
+            else:
+                try:
+                    total += amount * await self.get_price(f"{currency}-USD")
+                except Exception:
+                    continue  # no USD market for this asset; skip
         return total
 
     def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
