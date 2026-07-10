@@ -299,6 +299,37 @@ class CoinbaseExchange:
                     continue
         return total
 
+    def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
+        """Returns a Coinbase-valid base_size string for a SELL: capped at the
+        actually-held balance and floored to the product's base_increment.
+        Raises ValueError if the sellable amount is below the product minimum
+        (a dust position that can't be closed)."""
+        from decimal import Decimal, ROUND_DOWN
+
+        base_currency = symbol.split("-")[0]
+        available = 0.0
+        for account in self._client.get_accounts(limit=250).get("accounts", []):
+            if account.get("currency") == base_currency:
+                try:
+                    available = float(account["available_balance"]["value"])
+                except (KeyError, TypeError, ValueError):
+                    available = 0.0
+                break
+
+        sellable = min(float(requested), available) if available > 0 else float(requested)
+
+        product = self._client.get_product(product_id=symbol)
+        increment = Decimal(str(product.get("base_increment") or "0.00000001"))
+        min_size = Decimal(str(product.get("base_min_size") or "0"))
+        floored = Decimal(str(sellable)).quantize(increment, rounding=ROUND_DOWN)
+
+        if floored <= 0 or floored < min_size:
+            raise ValueError(
+                f"{symbol}: sellable size {floored} (held {available}) is below the "
+                f"exchange minimum {min_size} — position too small to close."
+            )
+        return format(floored, "f"), float(floored)
+
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
@@ -321,12 +352,18 @@ class CoinbaseExchange:
                     base_size = quote_size / price
                 if not base_size:
                     return {"success": False, "error": "SELL requires base_size"}
+                # Floor to the product's increment and cap at the actually-held
+                # balance — a too-precise or rounded-up size is rejected by
+                # Coinbase, which would leave the position open and unsold.
+                try:
+                    sized_str, filled_size = self._sell_size(symbol, base_size)
+                except ValueError as exc:
+                    return {"success": False, "error": str(exc)}
                 result = self._client.market_order_sell(
                     client_order_id=client_order_id,
                     product_id=symbol,
-                    base_size=str(round(base_size, 8)),
+                    base_size=sized_str,
                 )
-                filled_size = base_size
 
             if not result.get("success", False):
                 logger.error(f"[LIVE TRADE] Order failed: {result}")
