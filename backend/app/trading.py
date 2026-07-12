@@ -11,6 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
+from app import regime, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -101,6 +102,26 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             if len(open_positions) >= settings.max_open_positions:
                 reject(f"Max open positions ({settings.max_open_positions}) reached.")
                 await session.commit()
+                return
+
+            # Regime router: a strategy may only open in a regime it's built
+            # for, and nothing opens during a volatility blow-off. Runs before
+            # the AI call so blocked entries don't spend LLM tokens.
+            strategy_name = signal_data.get("strategy", "Unknown")
+            allowed, regime_reason, _ = await regime.check_entry(symbol, strategy_name)
+            if not allowed:
+                reject(regime_reason)
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked by regime filter: {regime_reason}")
+                return
+
+            # Validation gate: the pair must hold a PASS from the OOS backtest
+            # harness before real capital is risked on it.
+            allowed, gate_reason = await strategy_gate.check(strategy_name, symbol)
+            if not allowed:
+                reject(gate_reason)
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked by validation gate: {gate_reason}")
                 return
         elif action == "SELL":
             if not open_for_symbol:
