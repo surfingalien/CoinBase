@@ -36,6 +36,7 @@ export interface Position {
 
 export interface Portfolio {
   total_value: number;
+  holdings_value: number;
   usd_balance: number;
   trading_budget_usd: number | null;
   open_positions: number;
