@@ -98,7 +98,9 @@ class Settings(BaseSettings):
     # Taker fee simulated by the paper exchange on every fill, so paper cash
     # and P&L track what live trading would actually net instead of running
     # fee-free optimistic. Matches Coinbase Advanced Trade's retail taker
-    # tier; set to 0 for the old frictionless behaviour.
+    # tier; set to 0 for the old frictionless behaviour. Also used as the
+    # assumed per-side fee in the risk engine's expectancy check (an entry is
+    # rejected when round-trip fees eat too much of its take-profit distance).
     paper_fee_pct: float = 0.006
 
 

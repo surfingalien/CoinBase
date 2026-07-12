@@ -82,3 +82,9 @@ class Position(Base):
     # Fee paid on the entry order, carried on the position so realized P&L at
     # close can net out both sides' fees without joining back to orders.
     entry_fees_usd = Column(Float, nullable=True)
+
+    # Strategy that opened the position — lets the risk engine score each
+    # strategy by its own realized track record and size its next entries
+    # accordingly. Null on positions opened before attribution existed
+    # (those simply don't count toward any strategy's score).
+    strategy = Column(String, nullable=True, index=True)

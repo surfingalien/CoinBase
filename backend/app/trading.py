@@ -16,7 +16,13 @@ from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
-from app.risk import compute_daily_pnl_pct, effective_usd_balance, size_trade
+from app.risk import (
+    PERFORMANCE_LOOKBACK_TRADES,
+    compute_daily_pnl_pct,
+    effective_usd_balance,
+    performance_multiplier,
+    size_trade,
+)
 
 
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
@@ -135,11 +141,39 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         usd_balance = effective_usd_balance(await exchange.get_usd_balance())
         daily_pnl_pct = await compute_daily_pnl_pct(session, usd_balance, open_positions)
 
+        # Scale the entry by this strategy's own recent realized record:
+        # a strategy on a losing run gets its next bet cut instead of
+        # betting full size on the same static confidence forever.
+        strategy = signal_data.get("strategy", "Unknown")
+        recent_closed = (await session.execute(
+            select(Position)
+            .where(Position.status == "closed", Position.strategy == strategy)
+            .order_by(Position.closed_at.desc())
+            .limit(PERFORMANCE_LOOKBACK_TRADES)
+        )).scalars().all()
+        perf_mult = performance_multiplier(recent_closed)
+        size_multiplier = ai_result["size_multiplier"] * perf_mult
+        if perf_mult != 1.0:
+            signal.ai_reasoning += (
+                f" Strategy's recent record scaled the entry {perf_mult:.2f}x "
+                f"({len(recent_closed)} closed trades considered)."
+            )
+
+        # Take-profit distance for the fee-expectancy check: the signal's own
+        # target when it supplied one, otherwise the global exit percentage.
+        signal_price = float(signal_data.get("price") or 0)
+        ta_tp = signal_data.get("ta_take_profit")
+        take_profit_pct = settings.take_profit_pct
+        if ta_tp and signal_price > 0:
+            take_profit_pct = max(0.0, float(ta_tp) / signal_price - 1.0) or settings.take_profit_pct
+
         sizing = size_trade(
             ai_confidence=ai_result["confidence"],
-            ai_size_multiplier=ai_result["size_multiplier"],
+            ai_size_multiplier=size_multiplier,
             usd_balance=usd_balance,
             daily_pnl_pct=daily_pnl_pct,
+            fee_pct=settings.paper_fee_pct,
+            take_profit_pct=take_profit_pct,
         )
         if sizing.rejected:
             reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
@@ -179,6 +213,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             take_profit_price=signal_data.get("ta_take_profit"),
             stop_loss_price=signal_data.get("ta_stop_loss"),
             entry_fees_usd=entry_fees,
+            strategy=strategy,
         ))
 
         signal.status = "executed"
