@@ -88,3 +88,38 @@ def test_mean_reversion_buy_is_rejected_in_trending_market(pipeline_db, monkeypa
     assert signal.status == "rejected"
     assert "Regime filter" in signal.ai_reasoning
     assert "trend" in signal.ai_reasoning
+
+
+def test_demoted_strategy_buy_is_rejected(pipeline_db, monkeypatch):
+    """A strategy the evaluator demoted must be blocked at the pipeline door,
+    before the regime filter or any market data is touched."""
+    from app.models import Signal, StrategyStatus
+    from app.trading import process_signal
+
+    async def seed():
+        async with pipeline_db() as session:
+            session.add(StrategyStatus(
+                strategy="Turtle_Trend", status="demoted",
+                reason="negative expectancy over the last 30d: test seed",
+            ))
+            await session.commit()
+
+    asyncio.run(seed())
+
+    signal_id = str(uuid.uuid4())
+    asyncio.run(process_signal(
+        {"symbol": "BTC-USD", "action": "BUY", "strategy": "Turtle_Trend",
+         "price": 64500, "rsi": 50, "atr": 900},
+        signal_id,
+    ))
+
+    async def fetch_signal():
+        async with pipeline_db() as session:
+            return (await session.execute(
+                select(Signal).where(Signal.id == signal_id)
+            )).scalar_one()
+
+    signal = asyncio.run(fetch_signal())
+    assert signal.status == "rejected"
+    assert "Strategy evaluator" in signal.ai_reasoning
+    assert "demoted" in signal.ai_reasoning

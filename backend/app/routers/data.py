@@ -481,6 +481,25 @@ async def validation_gate_status():
     return strategy_gate.gate_status()
 
 
+@router.get("/evaluations")
+async def strategy_evaluations():
+    """The evaluator's current verdict on every strategy with live history:
+    trailing-window expectancy metrics, and which strategies are demoted
+    (blocked from opening) with the reason and cooldown state."""
+    from app import strategy_evaluator
+
+    return await strategy_evaluator.status_snapshot()
+
+
+@router.post("/evaluations/run")
+async def run_strategy_evaluation():
+    """Trigger one evaluation pass immediately instead of waiting for the
+    next scheduled run — useful after a batch of positions closes."""
+    from app import strategy_evaluator
+
+    return await strategy_evaluator.run_evaluation()
+
+
 @router.get("/momentum/rankings")
 async def momentum_rankings():
     """Cross-sectional momentum ranking of the whole universe (12-1 style
@@ -558,6 +577,10 @@ async def get_config():
             "regime_cache_minutes": settings.regime_cache_minutes,
             "validation_gate_enabled": settings.validation_gate_enabled,
             "validation_gate_ttl_hours": settings.validation_gate_ttl_hours,
+            "strategy_eval_enabled": settings.strategy_eval_enabled,
+            "strategy_eval_window_days": settings.strategy_eval_window_days,
+            "max_total_exposure_pct": settings.max_total_exposure_pct,
+            "maker_entries_enabled": settings.maker_entries_enabled,
         },
         "cross_sectional": {
             # The only new feature that can open positions on its own. Surfaced

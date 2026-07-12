@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # most one position per symbol, and caps how many symbols it holds at once.
     max_open_positions: int = 10
 
+    # Aggregate exposure cap: crypto positions are heavily correlated (one
+    # market beta), so ten "diversified" positions is really one big bet.
+    # Total deployed value (all open positions marked to market) may not
+    # exceed this fraction of tradeable equity (cash + deployed); new entries
+    # are clamped to the remaining headroom and rejected when none is left.
+    # Set to 1.0 to disable.
+    max_total_exposure_pct: float = 0.40
+
     # Automatic exit management: the position monitor closes a position the
     # moment its unrealized P&L crosses either threshold. The trailing stop
     # arms once a position is up trailing_stop_activation_pct, then sells if
@@ -97,6 +105,19 @@ class Settings(BaseSettings):
     validation_gate_enabled: bool = True
     validation_gate_ttl_hours: int = 24
 
+    # Strategy evaluator: a recurring self-review that scores every strategy
+    # on its trailing realized record (expectancy over the last
+    # strategy_eval_window_days). A strategy with clearly negative expectancy
+    # on enough trades is DEMOTED — blocked from opening new positions —
+    # and automatically reinstated on probation after the cooldown, so a
+    # losing streak stops costing money but a strategy is never exiled
+    # forever on one bad month.
+    strategy_eval_enabled: bool = True
+    strategy_eval_interval_hours: int = 24
+    strategy_eval_window_days: int = 30
+    strategy_eval_min_trades: int = 8
+    strategy_demotion_cooldown_days: int = 7
+
     # Validation harness (/api/validate): the fraction of history held out as
     # out-of-sample when backtesting a strategy before you trust it live.
     backtest_oos_fraction: float = 0.30
@@ -115,6 +136,15 @@ class Settings(BaseSettings):
     # assumed per-side fee in the risk engine's expectancy check (an entry is
     # rejected when round-trip fees eat too much of its take-profit distance).
     paper_fee_pct: float = 0.006
+
+    # Maker entries: place BUYs as post-only limit orders at the best bid
+    # (maker fee tier, ~0.35% vs ~0.6% taker) and fall back to a market order
+    # for whatever hasn't filled after the timeout. Exits always stay market
+    # orders — when a stop fires, getting out beats saving basis points.
+    # OFF by default: it changes live execution, so it's an explicit opt-in.
+    maker_entries_enabled: bool = False
+    maker_fee_pct: float = 0.0035
+    maker_fill_timeout_seconds: int = 45
 
 
 settings = Settings()

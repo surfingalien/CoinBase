@@ -11,7 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import regime, strategy_gate
+from app import regime, strategy_evaluator, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -104,10 +104,19 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
                 await session.commit()
                 return
 
+            # Evaluator verdict: a strategy demoted for negative live
+            # expectancy may not open new positions until reinstated.
+            strategy_name = signal_data.get("strategy", "Unknown")
+            demotion_reason = await strategy_evaluator.is_demoted(session, strategy_name)
+            if demotion_reason:
+                reject(f"[Strategy evaluator: {strategy_name} is demoted — {demotion_reason}]")
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked: {strategy_name} demoted")
+                return
+
             # Regime router: a strategy may only open in a regime it's built
             # for, and nothing opens during a volatility blow-off. Runs before
             # the AI call so blocked entries don't spend LLM tokens.
-            strategy_name = signal_data.get("strategy", "Unknown")
             allowed, regime_reason, _ = await regime.check_entry(symbol, strategy_name)
             if not allowed:
                 reject(regime_reason)
@@ -188,6 +197,9 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         if ta_tp and signal_price > 0:
             take_profit_pct = max(0.0, float(ta_tp) / signal_price - 1.0) or settings.take_profit_pct
 
+        open_position_value = sum(
+            (p.current_price or p.entry_price) * p.size for p in open_positions
+        )
         sizing = size_trade(
             ai_confidence=ai_result["confidence"],
             ai_size_multiplier=size_multiplier,
@@ -195,6 +207,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             daily_pnl_pct=daily_pnl_pct,
             fee_pct=settings.paper_fee_pct,
             take_profit_pct=take_profit_pct,
+            open_position_value=open_position_value,
         )
         if sizing.rejected:
             reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
