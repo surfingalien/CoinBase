@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     backtest_fee_pct: float = 0.005
     backtest_slippage_pct: float = 0.0005
 
+    # Taker fee simulated by the paper exchange on every fill, so paper cash
+    # and P&L track what live trading would actually net instead of running
+    # fee-free optimistic. Matches Coinbase Advanced Trade's retail taker
+    # tier; set to 0 for the old frictionless behaviour.
+    paper_fee_pct: float = 0.006
+
 
 settings = Settings()
 

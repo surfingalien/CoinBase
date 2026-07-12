@@ -42,6 +42,10 @@ class Order(Base):
     quote_size_usd = Column(Float, nullable=True)
     size = Column(Float)
     avg_fill_price = Column(Float, nullable=True)
+    # Exchange fee actually charged on this fill, in USD. Populated from the
+    # real order record in live mode and from the simulated fee in paper mode;
+    # null on rows written before fee tracking existed.
+    fees_usd = Column(Float, nullable=True)
     status = Column(String, default="pending")  # filled, failed, pending
     is_live = Column(Boolean, default=False)
 
@@ -74,3 +78,7 @@ class Position(Base):
     peak_price = Column(Float, nullable=True)
     realized_pnl = Column(Float, nullable=True)
     exit_reason = Column(String, nullable=True)  # take_profit, stop_loss, trailing_stop, sell_signal
+
+    # Fee paid on the entry order, carried on the position so realized P&L at
+    # close can net out both sides' fees without joining back to orders.
+    entry_fees_usd = Column(Float, nullable=True)
