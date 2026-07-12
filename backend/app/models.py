@@ -88,3 +88,18 @@ class Position(Base):
     # accordingly. Null on positions opened before attribution existed
     # (those simply don't count toward any strategy's score).
     strategy = Column(String, nullable=True, index=True)
+
+
+class StrategyStatus(Base):
+    """The evaluator's verdict on each strategy: 'active' strategies trade
+    normally; 'demoted' ones are blocked from opening new positions until the
+    cooldown elapses and they're reinstated. One row per strategy, updated by
+    the daily evaluation run."""
+    __tablename__ = "strategy_status"
+
+    strategy = Column(String, primary_key=True)
+    status = Column(String, default="active")  # active, demoted
+    reason = Column(Text, nullable=True)
+    metrics = Column(JSON, nullable=True)      # expectancy, win_rate, trades, ...
+    updated_at = Column(DateTime, default=_now)
+    demoted_at = Column(DateTime, nullable=True)

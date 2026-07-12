@@ -15,8 +15,9 @@ sells exactly what the position holds).
 """
 import json
 import re
+import time
 import uuid
-from typing import Any, Dict, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from loguru import logger
 
@@ -267,8 +268,11 @@ class MockExchange:
             if quote_size > self.usd_balance:
                 return {"success": False, "error": "Insufficient paper USD balance"}
             # Fee comes out of the quote amount, like a real quote-sized
-            # market buy: spend $X, receive $(X - fee) worth of coin.
-            fees_usd = quote_size * settings.paper_fee_pct
+            # market buy: spend $X, receive $(X - fee) worth of coin. With
+            # maker entries enabled, entries pay the maker tier instead —
+            # so paper P&L tracks the live economics of that setting too.
+            entry_fee_pct = settings.maker_fee_pct if settings.maker_entries_enabled else settings.paper_fee_pct
+            fees_usd = quote_size * entry_fee_pct
             filled_size = (quote_size - fees_usd) / price
             self.usd_balance -= quote_size
             self.holdings[symbol] = self.holdings.get(symbol, 0.0) + filled_size
@@ -299,6 +303,15 @@ class MockExchange:
             "avg_price": price,
             "fees_usd": fees_usd,
         }
+
+
+def combine_fills(fills: List[Dict[str, float]]) -> Tuple[float, float, float]:
+    """Merges partial fills (e.g. a partly-filled maker order plus its market
+    fallback) into (total_size, size-weighted avg price, total fees)."""
+    size = sum(f["size"] for f in fills)
+    fees = sum(f["fees"] for f in fills)
+    avg_price = sum(f["size"] * f["price"] for f in fills) / size if size > 0 else 0.0
+    return size, avg_price, fees
 
 
 class CoinbaseExchange:
@@ -406,6 +419,101 @@ class CoinbaseExchange:
                 }
         return None
 
+    async def _maker_buy(self, symbol: str, quote_size: float, ticker_price: float) -> Dict[str, Any]:
+        """Entry at the maker fee tier: post-only limit at the best bid,
+        polled until MAKER_FILL_TIMEOUT_SECONDS, then cancelled — and whatever
+        remains unfilled is bought at market so the entry the risk engine
+        sized is the entry that actually opens. Raises on total failure; the
+        caller falls back to a plain market order."""
+        import asyncio
+        from decimal import Decimal, ROUND_DOWN
+
+        product = self._client.get_product(product_id=symbol)
+        base_inc = Decimal(str(product.get("base_increment") or "0.00000001"))
+        quote_inc = Decimal(str(product.get("quote_increment") or "0.01"))
+
+        bid: Optional[float] = None
+        try:
+            book = self._client.get_best_bid_ask(product_ids=[symbol])
+            pricebooks = book.get("pricebooks") or []
+            bids = (pricebooks[0].get("bids") or []) if pricebooks else []
+            bid = float(bids[0]["price"]) if bids else None
+        except Exception:
+            bid = None  # book unavailable — a hair under ticker keeps post-only valid
+        limit_price = Decimal(str(bid if bid else ticker_price * 0.9995)).quantize(quote_inc, rounding=ROUND_DOWN)
+        base_size = (Decimal(str(quote_size)) / limit_price).quantize(base_inc, rounding=ROUND_DOWN)
+        if base_size <= 0:
+            raise ValueError(f"{symbol}: quote size {quote_size} is below one base increment at {limit_price}")
+
+        client_order_id = str(uuid.uuid4())
+        result = self._client.limit_order_gtc_buy(
+            client_order_id=client_order_id,
+            product_id=symbol,
+            base_size=format(base_size, "f"),
+            limit_price=format(limit_price, "f"),
+            post_only=True,
+        )
+        if not result.get("success", False):
+            raise RuntimeError(f"post-only limit rejected: {result.get('error_response')}")
+        order_id = result.get("success_response", {}).get("order_id", client_order_id)
+
+        filled: Dict[str, Any] = {}
+        deadline = time.monotonic() + settings.maker_fill_timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            order = self._client.get_order(order_id=order_id).get("order") or {}
+            if order.get("status") in ("FILLED", "CANCELLED", "EXPIRED", "FAILED"):
+                filled = order
+                break
+        if filled.get("status") != "FILLED":
+            try:
+                self._client.cancel_orders(order_ids=[order_id])
+            except Exception:
+                logger.warning(f"Could not cancel maker order {order_id}; proceeding on its last known state")
+            filled = self._client.get_order(order_id=order_id).get("order") or {}
+
+        fills: List[Dict[str, float]] = []
+        maker_size = float(filled.get("filled_size") or 0)
+        if maker_size > 0:
+            fills.append({
+                "size": maker_size,
+                "price": float(filled.get("average_filled_price") or 0) or float(limit_price),
+                "fees": float(filled.get("total_fees") or 0),
+            })
+
+        # Top up at market so a stale bid can't quietly halve the position.
+        filled_value = sum(f["size"] * f["price"] for f in fills)
+        remaining_quote = quote_size - filled_value
+        if remaining_quote >= 1.0:
+            market = self._client.market_order_buy(
+                client_order_id=str(uuid.uuid4()),
+                product_id=symbol,
+                quote_size=str(round(remaining_quote, 2)),
+            )
+            if market.get("success", False):
+                market_id = market.get("success_response", {}).get("order_id")
+                market_fill = await self._fetch_actual_fill(market_id) if market_id else None
+                if market_fill:
+                    fills.append({
+                        "size": market_fill["filled_size"],
+                        "price": market_fill["avg_price"] or ticker_price,
+                        "fees": market_fill["fees_usd"],
+                    })
+                else:
+                    fills.append({"size": remaining_quote / ticker_price, "price": ticker_price, "fees": 0.0})
+            elif not fills:
+                raise RuntimeError(f"maker unfilled and market fallback rejected: {market.get('error_response')}")
+
+        size, avg_price, fees_usd = combine_fills(fills)
+        if size <= 0:
+            raise RuntimeError("maker entry produced no fill")
+        logger.warning(
+            f"[LIVE TRADE] BUY {symbol} {size:.6f} units @ ${avg_price:,.2f} "
+            f"(maker entry{' + market top-up' if len(fills) > 1 else ''}, fees ${fees_usd:.2f})"
+        )
+        return {"success": True, "order_id": order_id, "filled_size": size,
+                "avg_price": avg_price, "fees_usd": fees_usd}
+
     def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
         """Returns a Coinbase-valid base_size string for a SELL: capped at the
         actually-held balance and floored to the product's base_increment.
@@ -448,6 +556,11 @@ class CoinbaseExchange:
             if side == "BUY":
                 if not quote_size:
                     return {"success": False, "error": "BUY requires quote_size"}
+                if settings.maker_entries_enabled:
+                    try:
+                        return await self._maker_buy(symbol, quote_size, price)
+                    except Exception:
+                        logger.exception(f"Maker entry for {symbol} failed; falling back to market order")
                 result = self._client.market_order_buy(
                     client_order_id=client_order_id,
                     product_id=symbol,

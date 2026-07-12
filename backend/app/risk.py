@@ -7,7 +7,7 @@ misconfigured strategy) can't oversize a trade.
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from app.config import settings
 
@@ -32,25 +32,43 @@ PERFORMANCE_LOOKBACK_TRADES = 20
 PERFORMANCE_MIN_TRADES = 5
 
 
-def performance_multiplier(recent_closed: List) -> float:
-    """Sizes a strategy's next entry by its own realized track record.
+def expectancy_stats(recent_closed: List) -> Optional[dict]:
+    """Expectancy and profit factor over a set of closed positions with
+    realized_pnl (net of fees). Returns None when there's nothing scored.
 
-    Positions must carry realized_pnl (net of fees). With fewer than
-    PERFORMANCE_MIN_TRADES scored trades the multiplier is neutral — a new
-    or renamed strategy is neither rewarded nor punished on noise. A
-    strategy that is both winning often and net profitable sizes up
-    slightly; one that is losing most trades or net negative is cut hard
-    rather than being allowed to keep betting at full size.
+    expectancy   = average P&L per trade (what one more trade is 'worth')
+    profit_factor = gross wins / gross losses (how asymmetric the payoffs are)
     """
-    scored = [p for p in recent_closed if p.realized_pnl is not None]
-    if len(scored) < PERFORMANCE_MIN_TRADES:
+    pnls = [p.realized_pnl for p in recent_closed if p.realized_pnl is not None]
+    if not pnls:
+        return None
+    wins = [x for x in pnls if x > 0]
+    losses = [x for x in pnls if x <= 0]
+    gross_win = sum(wins)
+    gross_loss = -sum(losses)
+    return {
+        "trades": len(pnls),
+        "win_rate": len(wins) / len(pnls),
+        "expectancy": sum(pnls) / len(pnls),
+        "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (float("inf") if gross_win > 0 else 0.0),
+        "net_pnl": sum(pnls),
+    }
+
+
+def performance_multiplier(recent_closed: List) -> float:
+    """Sizes a strategy's next entry by its own realized track record,
+    judged on EXPECTANCY rather than win rate: a 40% win-rate strategy with
+    3:1 winners is a better bet than a 60% one with 1:2 losers. With fewer
+    than PERFORMANCE_MIN_TRADES scored trades the multiplier is neutral —
+    a new strategy is neither rewarded nor punished on noise. Negative
+    expectancy is cut hard; positive expectancy with clearly asymmetric
+    payoffs (profit factor >= 1.5) sizes up slightly."""
+    stats = expectancy_stats(recent_closed)
+    if stats is None or stats["trades"] < PERFORMANCE_MIN_TRADES:
         return 1.0
-    wins = sum(1 for p in scored if p.realized_pnl > 0)
-    win_rate = wins / len(scored)
-    net_pnl = sum(p.realized_pnl for p in scored)
-    if win_rate <= 0.35 or net_pnl < 0:
+    if stats["expectancy"] < 0:
         return 0.6
-    if win_rate >= 0.55:
+    if stats["profit_factor"] >= 1.5:
         return 1.15
     return 1.0
 
@@ -113,6 +131,7 @@ def size_trade(
     daily_pnl_pct: float = 0.0,
     fee_pct: float = 0.0,
     take_profit_pct: float = 0.0,
+    open_position_value: float = 0.0,
 ) -> SizingResult:
     if daily_pnl_pct <= -settings.max_daily_loss_pct:
         return SizingResult(0.0, True, f"Daily loss limit reached ({daily_pnl_pct:.1%}). Trading paused for the day.")
@@ -133,6 +152,21 @@ def size_trade(
     raw_size = settings.base_trade_size_usd * ai_size_multiplier * ai_confidence
     max_allowed = usd_balance * settings.max_position_pct_of_portfolio
     quote_size = min(raw_size, max_allowed)
+
+    # Aggregate exposure cap: clamp the entry to whatever headroom remains
+    # under MAX_TOTAL_EXPOSURE_PCT of tradeable equity. Correlated crypto
+    # positions stack into one market bet, so the cap binds on the total.
+    if settings.max_total_exposure_pct < 1.0:
+        equity = usd_balance + open_position_value
+        headroom = equity * settings.max_total_exposure_pct - open_position_value
+        if headroom < MIN_TRADE_SIZE_USD:
+            return SizingResult(
+                0.0, True,
+                f"Portfolio exposure cap reached: ${open_position_value:,.0f} deployed "
+                f"of a ${equity * settings.max_total_exposure_pct:,.0f} limit "
+                f"({settings.max_total_exposure_pct:.0%} of equity).",
+            )
+        quote_size = min(quote_size, headroom)
 
     if quote_size < MIN_TRADE_SIZE_USD:
         return SizingResult(0.0, True, "Trade size too small after risk adjustments.")
