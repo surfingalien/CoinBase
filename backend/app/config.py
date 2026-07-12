@@ -84,6 +84,19 @@ class Settings(BaseSettings):
     # acts once on momentum_rebalance_day each month, regardless of interval.
     cross_sectional_check_interval_seconds: int = 21600
 
+    # Regime filter: classifies each symbol's market regime (trend / range /
+    # storm / neutral) from its own daily candles and only lets strategies
+    # open positions in regimes they're built for. Exits are never filtered.
+    regime_filter_enabled: bool = True
+    regime_cache_minutes: int = 60
+
+    # Validation gate: a (strategy, symbol) pair must hold a PASS verdict from
+    # the out-of-sample backtest harness before new entries are allowed, and
+    # is revalidated on this TTL. Strategies the harness can't model are
+    # exempt; validation infrastructure errors fail open.
+    validation_gate_enabled: bool = True
+    validation_gate_ttl_hours: int = 24
+
     # Validation harness (/api/validate): the fraction of history held out as
     # out-of-sample when backtesting a strategy before you trust it live.
     backtest_oos_fraction: float = 0.30

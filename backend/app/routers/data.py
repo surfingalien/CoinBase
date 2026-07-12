@@ -448,6 +448,39 @@ async def diagnostics():
     return out
 
 
+@router.get("/regime")
+async def regime_overview(symbol: str | None = None):
+    """Current market regime per symbol (trend / range / storm / neutral)
+    with the ADX and volatility-percentile numbers behind the call — the
+    same classification the trading pipeline's regime filter enforces."""
+    from app import regime as regime_mod
+
+    symbols = [symbol] if symbol else ALLOWED_PAIRS
+    if symbol and symbol not in ALLOWED_PAIRS:
+        raise HTTPException(status_code=400, detail=f"{symbol} is not in the allowed universe.")
+    out = {}
+    for sym in symbols:
+        out[sym] = await regime_mod.get_regime(sym)
+    return {
+        "enabled": settings.regime_filter_enabled,
+        "thresholds": {
+            "trend_adx": regime_mod.TREND_ADX,
+            "range_adx": regime_mod.RANGE_ADX,
+            "storm_vol_percentile": regime_mod.STORM_VOL_PCTILE,
+        },
+        "regimes": out,
+    }
+
+
+@router.get("/gate")
+async def validation_gate_status():
+    """Every cached validation verdict the gate is currently enforcing —
+    which (strategy, symbol) pairs are blocked from opening and why."""
+    from app import strategy_gate
+
+    return strategy_gate.gate_status()
+
+
 @router.get("/momentum/rankings")
 async def momentum_rankings():
     """Cross-sectional momentum ranking of the whole universe (12-1 style
@@ -519,6 +552,12 @@ async def get_config():
         "sentiment": {
             "enabled": settings.sentiment_enabled,
             "cache_minutes": settings.sentiment_cache_minutes,
+        },
+        "gates": {
+            "regime_filter_enabled": settings.regime_filter_enabled,
+            "regime_cache_minutes": settings.regime_cache_minutes,
+            "validation_gate_enabled": settings.validation_gate_enabled,
+            "validation_gate_ttl_hours": settings.validation_gate_ttl_hours,
         },
         "cross_sectional": {
             # The only new feature that can open positions on its own. Surfaced
