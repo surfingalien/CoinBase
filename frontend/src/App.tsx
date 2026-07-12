@@ -270,9 +270,10 @@ function DashboardTab({ isLoading, portfolio, stats, signals, orders }: {
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
                   <Wallet className="h-4 w-4 text-primary" />
                 </div>
-                <span className="text-sm font-medium uppercase tracking-wider text-foreground-muted">Total Portfolio Value</span>
+                <span className="text-sm font-medium uppercase tracking-wider text-foreground-muted">Holdings Value</span>
               </div>
-              <p className="text-4xl font-bold tracking-tight lg:text-5xl">{formatCurrency(portfolio?.total_value)}</p>
+              <p className="text-4xl font-bold tracking-tight lg:text-5xl">{formatCurrency(portfolio?.holdings_value)}</p>
+              <p className="text-xs text-foreground-muted">Total with cash: {formatCurrency(portfolio?.total_value)}</p>
               <div className="flex flex-wrap items-center gap-4">
                 <div className={cn("flex items-center gap-1.5", (stats?.total_pnl || 0) >= 0 ? "text-success" : "text-danger")}>
                   {(stats?.total_pnl || 0) >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}

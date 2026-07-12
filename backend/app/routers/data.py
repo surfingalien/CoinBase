@@ -69,6 +69,10 @@ async def get_portfolio():
         total_value = account_value or (usd_balance + position_value)
         return {
             "total_value": total_value,
+            # Crypto actually held (tracked + untracked), marked to market —
+            # the account NAV minus the cash that's merely waiting to trade.
+            # This is the dashboard's headline number; cash is shown apart.
+            "holdings_value": max(0.0, total_value - usd_balance),
             "usd_balance": usd_balance,
             "tracked_position_value": position_value,
             # Signed on purpose: positive = the account holds value the DB
