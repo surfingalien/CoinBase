@@ -187,16 +187,18 @@ _FALLBACK_PRICES = {
 
 class MockExchange:
     """Paper-trading simulator. Never touches a real account, but marks to
-    real market prices so take-profit/stop-loss and P&L behave realistically."""
+    real market prices so take-profit/stop-loss and P&L behave realistically,
+    and charges PAPER_FEE_PCT per fill so paper cash tracks what live
+    trading would net."""
 
     is_live = False
     STARTING_BALANCE_USD = 25000.0
 
     def __init__(self) -> None:
         self.usd_balance = self.STARTING_BALANCE_USD
-        # Best-effort holdings ledger. In-memory only: after a restart the
-        # database still knows the open positions, so exits are always
-        # honoured even if this ledger has been reset.
+        # Holdings ledger. In-memory, so it dies on restart while the DB's
+        # open positions survive — restore_state() rebuilds it from those
+        # positions at startup so cash + holdings stay consistent with the DB.
         self.holdings: Dict[str, float] = {}
         self._last_price: Dict[str, float] = dict(_FALLBACK_PRICES)
 
@@ -206,6 +208,34 @@ class MockExchange:
         dashboard and the simulator agree on a clean slate."""
         self.usd_balance = self.STARTING_BALANCE_USD
         self.holdings.clear()
+
+    def restore_state(self, open_positions) -> None:
+        """Rebuilds the in-memory ledger from the DB's open positions after a
+        restart: re-adds each position's coins to holdings and re-deducts its
+        entry cost from the fresh starting balance. Without this, a restart
+        hands the paper account its $25k back while the DB still shows the
+        positions — and closing them later credits cash that was never spent.
+        """
+        self.usd_balance = self.STARTING_BALANCE_USD
+        self.holdings.clear()
+        for position in open_positions:
+            cost = position.entry_price * position.size + (position.entry_fees_usd or 0.0)
+            self.holdings[position.symbol] = self.holdings.get(position.symbol, 0.0) + position.size
+            self.usd_balance -= cost
+        if self.usd_balance < 0:
+            # Open cost basis exceeds the starting bankroll (positions opened
+            # under an older, larger balance). Floor at zero: better to block
+            # new buys than to trade on negative cash.
+            logger.warning(
+                f"[PAPER] Restored open positions cost more than the starting balance "
+                f"(shortfall ${-self.usd_balance:,.2f}); flooring cash at $0."
+            )
+            self.usd_balance = 0.0
+        if self.holdings:
+            logger.info(
+                f"[PAPER] Restored {len(self.holdings)} holding(s) from DB positions; "
+                f"cash ${self.usd_balance:,.2f}"
+            )
 
     async def get_price(self, symbol: str) -> float:
         live = await market_data.fetch_last_price(symbol)
@@ -236,7 +266,10 @@ class MockExchange:
                 return {"success": False, "error": "BUY requires quote_size"}
             if quote_size > self.usd_balance:
                 return {"success": False, "error": "Insufficient paper USD balance"}
-            filled_size = quote_size / price
+            # Fee comes out of the quote amount, like a real quote-sized
+            # market buy: spend $X, receive $(X - fee) worth of coin.
+            fees_usd = quote_size * settings.paper_fee_pct
+            filled_size = (quote_size - fees_usd) / price
             self.usd_balance -= quote_size
             self.holdings[symbol] = self.holdings.get(symbol, 0.0) + filled_size
         else:
@@ -250,15 +283,21 @@ class MockExchange:
                 # holds the position — honour the exit rather than stranding it.
                 logger.warning(f"[PAPER TRADE] Holdings ledger shows {held} {symbol} but selling {base_size}")
             filled_size = base_size
+            gross = base_size * price
+            fees_usd = gross * settings.paper_fee_pct
             self.holdings[symbol] = max(0.0, held - base_size)
-            self.usd_balance += base_size * price
+            self.usd_balance += gross - fees_usd
 
-        logger.info(f"[PAPER TRADE] {side} {symbol} {filled_size:.6f} units @ ${price:,.2f}")
+        logger.info(
+            f"[PAPER TRADE] {side} {symbol} {filled_size:.6f} units @ ${price:,.2f} "
+            f"(fee ${fees_usd:.2f})"
+        )
         return {
             "success": True,
             "order_id": str(uuid.uuid4()),
             "filled_size": filled_size,
             "avg_price": price,
+            "fees_usd": fees_usd,
         }
 
 
@@ -337,6 +376,36 @@ class CoinbaseExchange:
                     continue  # no USD market for this asset; skip
         return total
 
+    async def _fetch_actual_fill(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Polls the placed order until Coinbase reports its fill, and returns
+        the ACTUAL filled size, average fill price, and fees charged. Market
+        orders normally fill within a second; if the order still isn't filled
+        after the polling window, returns None and the caller keeps its
+        pre-order estimate. This is what keeps the DB's idea of a position in
+        lockstep with the coins that actually landed in the account — the
+        ticker-price estimate ignores both slippage and the taker fee, so it
+        overstates every buy by the fee percentage."""
+        import asyncio
+
+        for attempt in range(5):
+            if attempt:
+                await asyncio.sleep(0.5)
+            try:
+                order = self._client.get_order(order_id=order_id).get("order") or {}
+            except Exception:
+                logger.warning(f"Could not fetch order {order_id} for fill details (attempt {attempt + 1})")
+                continue
+            filled_size = float(order.get("filled_size") or 0)
+            if order.get("status") in ("FILLED", "CANCELLED", "EXPIRED", "FAILED") or filled_size > 0:
+                if filled_size <= 0:
+                    return None
+                return {
+                    "filled_size": filled_size,
+                    "avg_price": float(order.get("average_filled_price") or 0) or None,
+                    "fees_usd": float(order.get("total_fees") or 0),
+                }
+        return None
+
     def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
         """Returns a Coinbase-valid base_size string for a SELL: capped at the
         actually-held balance and floored to the product's base_increment.
@@ -408,12 +477,34 @@ class CoinbaseExchange:
                 return {"success": False, "error": result.get("error_response")}
 
             order = result.get("success_response", {})
-            logger.warning(f"[LIVE TRADE] {side} {symbol} {filled_size:.6f} units @ ~${price:,.2f}")
+            order_id = order.get("order_id", client_order_id)
+
+            # Replace the ticker-price estimate with the real fill. The
+            # estimate ignores slippage and the taker fee, so recording it
+            # would overstate the position vs. the coins actually received —
+            # the drift the reconcile endpoint exists to catch.
+            avg_price, fees_usd = price, 0.0
+            fill = await self._fetch_actual_fill(order_id)
+            if fill:
+                filled_size = fill["filled_size"]
+                avg_price = fill["avg_price"] or price
+                fees_usd = fill["fees_usd"]
+            else:
+                logger.warning(
+                    f"[LIVE TRADE] Could not confirm fill for {order_id}; "
+                    f"recording pre-order estimate (size may overstate by the fee)."
+                )
+
+            logger.warning(
+                f"[LIVE TRADE] {side} {symbol} {filled_size:.6f} units @ ${avg_price:,.2f} "
+                f"(fees ${fees_usd:.2f})"
+            )
             return {
                 "success": True,
-                "order_id": order.get("order_id", client_order_id),
+                "order_id": order_id,
                 "filled_size": filled_size,
-                "avg_price": price,
+                "avg_price": avg_price,
+                "fees_usd": fees_usd,
             }
         except Exception as exc:
             logger.exception("Coinbase order placement failed")
@@ -441,3 +532,25 @@ def get_exchange() -> Exchange:
         _exchange_instance = MockExchange()
 
     return _exchange_instance
+
+
+async def reconcile_paper_state() -> None:
+    """Startup hook: rebuild the paper exchange's cash/holdings from the DB's
+    open positions, so a restart doesn't reset paper cash to $25k while the
+    positions live on (which also let later closes credit unspent cash).
+    No-op in live mode — the real account is its own source of truth."""
+    from sqlalchemy import select
+
+    from app.database import async_session
+    from app.models import Position
+
+    exchange = get_exchange()
+    if not isinstance(exchange, MockExchange):
+        return
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+    if open_positions:
+        exchange.restore_state(open_positions)

@@ -8,6 +8,7 @@ from loguru import logger
 
 from app import cross_sectional_monitor, market_analysis_monitor, position_monitor
 from app.database import init_db
+from app.exchange import reconcile_paper_state
 from app.routers import data, webhook
 
 
@@ -15,6 +16,9 @@ from app.routers import data, webhook
 async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
+    # Must run before the monitors: rebuilds paper cash/holdings from the
+    # DB's open positions so a restart can't desync the simulator's ledger.
+    await reconcile_paper_state()
     position_monitor.start()
     market_analysis_monitor.start()
     cross_sectional_monitor.start()

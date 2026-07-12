@@ -71,7 +71,11 @@ async def get_portfolio():
             "total_value": total_value,
             "usd_balance": usd_balance,
             "tracked_position_value": position_value,
-            "untracked_value": max(0.0, total_value - usd_balance - position_value),
+            # Signed on purpose: positive = the account holds value the DB
+            # isn't tracking; NEGATIVE = the DB's positions claim more than
+            # the account actually holds (drift). Clamping this to zero hid
+            # exactly the mismatch /api/reconcile exists to expose.
+            "untracked_value": total_value - usd_balance - position_value,
             "trading_budget_usd": settings.trading_budget_usd or None,
             "open_positions": len(positions),
             "is_live": exchange.is_live,
@@ -303,6 +307,78 @@ async def sync_holdings():
     }
 
 
+def _drift_rows(db_sizes: dict, exchange_sizes: dict, prices: dict) -> list:
+    """Per-symbol comparison of what the DB thinks is held (open positions)
+    vs. what the exchange account actually holds. Pure function so the drift
+    math is directly testable. drift = exchange - db: negative means the DB
+    claims more coins than exist (the classic estimated-fill overstatement);
+    positive means untracked coins. A relative tolerance absorbs float noise."""
+    rows = []
+    for symbol in sorted(set(db_sizes) | set(exchange_sizes)):
+        db_size = db_sizes.get(symbol, 0.0)
+        actual = exchange_sizes.get(symbol, 0.0)
+        drift = actual - db_size
+        tolerance = max(1e-9, db_size * 0.001)
+        price = prices.get(symbol, 0.0)
+        rows.append({
+            "symbol": symbol,
+            "db_size": db_size,
+            "exchange_size": actual,
+            "drift": drift,
+            "drift_usd": drift * price,
+            "in_sync": abs(drift) <= tolerance,
+        })
+    return rows
+
+
+@router.get("/reconcile")
+async def reconcile():
+    """Truth check between the database and the exchange account: per-symbol
+    holdings drift plus the cash balance, so 'holdings and cash don't match'
+    becomes a concrete number per symbol instead of a mystery."""
+    try:
+        exchange = get_exchange()
+        held_by_currency = await _live_crypto_holdings(exchange)
+        usd_balance = await exchange.get_usd_balance()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    exchange_sizes = {f"{currency}-USD": amount for currency, amount in held_by_currency.items()}
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+
+    db_sizes: dict = {}
+    for p in open_positions:
+        db_sizes[p.symbol] = db_sizes.get(p.symbol, 0.0) + p.size
+
+    prices: dict = {}
+    for symbol in set(db_sizes) | set(exchange_sizes):
+        try:
+            prices[symbol] = await exchange.get_price(symbol)
+        except Exception:
+            prices[symbol] = 0.0
+
+    rows = _drift_rows(db_sizes, exchange_sizes, prices)
+    out_of_sync = [r for r in rows if not r["in_sync"]]
+    return {
+        "is_live": exchange.is_live,
+        "usd_balance": usd_balance,
+        "holdings": rows,
+        "out_of_sync_count": len(out_of_sync),
+        "total_drift_usd": sum(r["drift_usd"] for r in rows),
+        "note": (
+            "drift = exchange - database. Negative drift on a symbol means the DB "
+            "position claims more coins than the account holds (typically fills "
+            "recorded from pre-order estimates before fee tracking); positive "
+            "drift means coins the bot isn't tracking (buys made outside the bot "
+            "— POST /api/sync-holdings can register them)."
+        ),
+    }
+
+
 @router.get("/ai-selftest")
 async def ai_selftest(symbol: str = "BTC-USD"):
     """Runs one live Claude + web-research analysis for a single symbol and
@@ -337,9 +413,11 @@ async def diagnostics():
                     balances[acct.get("currency")] = value
             out["nonzero_balances"] = balances
             out["note"] = (
-                "Trading pairs are '-USD'; orders draw from the USD balance. "
-                "If your cash shows under USDC (not USD), convert USDC->USD on "
-                "Coinbase (instant, 1:1, free) so buys can fill."
+                "Spendable cash counts USD + USDC (Coinbase's unified books "
+                "treat them 1:1 on -USD pairs), matching how the sizing logic "
+                "computes the balance. If a buy is rejected for insufficient "
+                "funds while cash shows here, check which currency holds it "
+                "and convert on Coinbase (instant, 1:1, free)."
             )
         except Exception as exc:
             out["balance_error"] = str(exc)

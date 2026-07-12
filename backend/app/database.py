@@ -43,6 +43,28 @@ class Base(DeclarativeBase):
     pass
 
 
+def _add_missing_columns(sync_conn) -> None:
+    """Minimal forward-only migration: create_all() never alters existing
+    tables, so columns added to the models after a database was first created
+    have to be added here or every ORM SELECT against an old database fails.
+    Only nullable columns can be handled this way, which is all we need."""
+    from sqlalchemy import inspect, text
+
+    added_columns = {
+        "orders": {"fees_usd": "FLOAT"},
+        "positions": {"entry_fees_usd": "FLOAT"},
+    }
+    inspector = inspect(sync_conn)
+    for table, columns in added_columns.items():
+        if table not in inspector.get_table_names():
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table)}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)

@@ -29,17 +29,25 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
         return False
 
     exit_price = order_result["avg_price"]
+    exit_fees = order_result.get("fees_usd") or 0.0
     session.add(Order(
         symbol=position.symbol,
         side="SELL",
         quote_size_usd=position.size * exit_price,
         size=position.size,
         avg_fill_price=exit_price,
+        fees_usd=exit_fees,
         status="filled",
         is_live=exchange.is_live,
     ))
     position.current_price = exit_price
-    position.realized_pnl = (exit_price - position.entry_price) * position.size
+    # Realized P&L is net cash: sale proceeds minus purchase cost, with the
+    # fees actually charged on both sides taken out — matching the account.
+    position.realized_pnl = (
+        (exit_price - position.entry_price) * position.size
+        - exit_fees
+        - (position.entry_fees_usd or 0.0)
+    )
     position.unrealized_pnl = 0.0
     position.status = "closed"
     position.closed_at = datetime.now(timezone.utc)
@@ -149,6 +157,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             return
 
         entry_price = order_result["avg_price"]
+        entry_fees = order_result.get("fees_usd") or 0.0
         session.add(Order(
             signal_id=signal_id,
             symbol=symbol,
@@ -156,6 +165,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             quote_size_usd=sizing.quote_size_usd,
             size=order_result["filled_size"],
             avg_fill_price=entry_price,
+            fees_usd=entry_fees,
             status="filled",
             is_live=exchange.is_live,
         ))
@@ -168,6 +178,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             peak_price=entry_price,
             take_profit_price=signal_data.get("ta_take_profit"),
             stop_loss_price=signal_data.get("ta_stop_loss"),
+            entry_fees_usd=entry_fees,
         ))
 
         signal.status = "executed"
