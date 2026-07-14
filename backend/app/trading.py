@@ -133,10 +133,22 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
                 logger.info(f"Signal {signal_id} blocked by validation gate: {gate_reason}")
                 return
         elif action == "SELL":
+            # Hold-only positions (synced without exit management) are never
+            # sold by the bot — not by the monitor, not by SELL signals.
+            sellable = [p for p in open_for_symbol if p.managed is not False]
             if not open_for_symbol:
                 reject("No open position to sell — long-only system, shorting not supported.")
                 await session.commit()
                 return
+            if not sellable:
+                reject(
+                    f"The open {symbol} position is hold-only (synced without exit "
+                    f"management) — the bot will not sell it. Re-sync with "
+                    f"?manage_exits=true to hand its exits to the bot."
+                )
+                await session.commit()
+                return
+            open_for_symbol = sellable
         else:
             reject(f"Unsupported action '{action}'.")
             await session.commit()

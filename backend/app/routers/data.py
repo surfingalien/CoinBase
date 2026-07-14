@@ -46,12 +46,12 @@ async def get_portfolio():
             position_value += current_price * p.size
             # Show the *effective* exit levels the monitor will actually use:
             # an explicit signal-supplied price when present, otherwise the
-            # global take-profit/stop-loss percentage off entry. Synced
-            # holdings have no explicit price but are still protected by the
-            # percentage fallback — surface that so the dashboard doesn't look
-            # like they're unguarded.
-            effective_tp = p.take_profit_price or p.entry_price * (1 + settings.take_profit_pct)
-            effective_sl = p.stop_loss_price or p.entry_price * (1 - settings.stop_loss_pct)
+            # global take-profit/stop-loss percentage off entry. Hold-only
+            # positions are never exited by the bot, so they get no levels —
+            # showing fallback numbers there would misrepresent them as armed.
+            is_managed = p.managed is not False
+            effective_tp = (p.take_profit_price or p.entry_price * (1 + settings.take_profit_pct)) if is_managed else None
+            effective_sl = (p.stop_loss_price or p.entry_price * (1 - settings.stop_loss_pct)) if is_managed else None
             position_payload.append({
                 "symbol": p.symbol,
                 "side": p.side,
@@ -62,6 +62,7 @@ async def get_portfolio():
                 "take_profit_price": effective_tp,
                 "stop_loss_price": effective_sl,
                 "unrealized_pnl": unrealized_pnl,
+                "managed": is_managed,
             })
 
         # Prefer the real account NAV; fall back to cash + tracked positions
@@ -251,12 +252,25 @@ async def _live_crypto_holdings(exchange) -> dict:
 
 
 @router.post("/sync-holdings")
-async def sync_holdings():
-    """Registers crypto you already hold on Coinbase as tracked positions, so
-    the bot manages their exits (take-profit / stop-loss / trailing) going
-    forward. Entry price is set to the current market price (the Advanced
-    Trade balance endpoint doesn't expose original cost basis), so P&L and
-    exit thresholds are measured from now, not your original purchase."""
+async def sync_holdings(manage_exits: bool = False):
+    """Registers crypto you already hold on Coinbase as tracked positions.
+
+    Default (manage_exits=false): HOLD-ONLY — the position shows in the
+    portfolio and counts toward exposure, but the bot will never sell it.
+    This is the safe default: the old behaviour applied the global 4% stop /
+    8% target to synced bags, and market noise hits the closer barrier about
+    two thirds of the time — registering a portfolio effectively scheduled
+    its liquidation at a loss.
+
+    With ?manage_exits=true the bot does manage exits, but with levels
+    scaled to each symbol's own volatility (2*ATR stop, 3*ATR target) rather
+    than the fixed percentages, so the stop sits outside normal daily noise
+    and the reward exceeds the risk. Entry price is the current market price
+    (Coinbase's balance endpoint doesn't expose original cost basis)."""
+    from app import market_data
+    from app.risk import atr_exit_levels
+    from app.technical_indicators import compute_atr
+
     try:
         exchange = get_exchange()
         raw = await _live_crypto_holdings(exchange)
@@ -287,6 +301,13 @@ async def sync_holdings():
             if value_usd < 1.0:
                 skipped.append({"symbol": symbol, "reason": "dust (< $1)"})
                 continue
+
+            stop_loss = take_profit = None
+            if manage_exits:
+                candles = await market_data.fetch_candles(symbol, 86400)
+                atr = compute_atr(candles["highs"], candles["lows"], candles["closes"]) if candles else None
+                stop_loss, take_profit = atr_exit_levels(price, atr)
+
             session.add(Position(
                 symbol=symbol,
                 side="long",
@@ -296,18 +317,27 @@ async def sync_holdings():
                 peak_price=price,
                 unrealized_pnl=0.0,
                 exit_reason=None,
+                managed=manage_exits,
+                stop_loss_price=stop_loss,
+                take_profit_price=take_profit,
             ))
-            synced.append({"symbol": symbol, "size": amount, "entry_price": price,
-                           "value_usd": round(value_usd, 2)})
+            synced.append({
+                "symbol": symbol, "size": amount, "entry_price": price,
+                "value_usd": round(value_usd, 2), "managed": manage_exits,
+                "stop_loss_price": stop_loss, "take_profit_price": take_profit,
+            })
         await session.commit()
 
     return {
         "synced": synced,
         "skipped": skipped,
-        "note": ("Synced positions use current price as cost basis; the monitor now "
-                 "applies take-profit/stop-loss/trailing to them from that price. Only "
-                 "coins with an allowed -USD pair are synced. Don't sync a coin you want "
-                 "to hold long-term — the bot will manage its exit like any position."),
+        "note": (
+            "Synced positions are HOLD-ONLY by default: tracked in the portfolio and "
+            "exposure math, never sold by the bot. Re-run with ?manage_exits=true to "
+            "have the monitor manage them with ATR-scaled exits (2*ATR stop, 3*ATR "
+            "target; falls back to the global percentages only if candle history is "
+            "unavailable). Entry price is today's market price, not original cost."
+        ),
     }
 
 

@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # disable trailing and use the fixed take-profit only.
     take_profit_pct: float = 0.08
     stop_loss_pct: float = 0.04
+    # Volatility-scaled exit levels for positions that opt into managed
+    # exits at sync time (and any caller that wants ATR-based levels):
+    # stop = entry - atr_stop_multiple * ATR(14), target = entry +
+    # atr_take_profit_multiple * ATR(14). Keeps the stop outside normal
+    # daily noise and the reward larger than the risk.
+    atr_stop_multiple: float = 2.0
+    atr_take_profit_multiple: float = 3.0
     trailing_stop_pct: float = 0.03
     trailing_stop_activation_pct: float = 0.04
     position_monitor_interval_seconds: int = 30

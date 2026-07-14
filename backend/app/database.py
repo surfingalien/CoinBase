@@ -52,7 +52,13 @@ def _add_missing_columns(sync_conn) -> None:
 
     added_columns = {
         "orders": {"fees_usd": "FLOAT"},
-        "positions": {"entry_fees_usd": "FLOAT", "strategy": "VARCHAR"},
+        "positions": {
+            "entry_fees_usd": "FLOAT",
+            "strategy": "VARCHAR",
+            "managed": "BOOLEAN",
+            "day_mark_price": "FLOAT",
+            "day_mark_date": "VARCHAR",
+        },
     }
     inspector = inspect(sync_conn)
     for table, columns in added_columns.items():

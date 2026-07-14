@@ -32,6 +32,20 @@ PERFORMANCE_LOOKBACK_TRADES = 20
 PERFORMANCE_MIN_TRADES = 5
 
 
+def atr_exit_levels(entry_price: float, atr: Optional[float]) -> tuple:
+    """(stop_loss, take_profit) scaled to the symbol's own volatility:
+    stop at ATR_STOP_MULTIPLE*ATR below entry (outside normal daily noise),
+    target at ATR_TAKE_PROFIT_MULTIPLE*ATR above (reward > risk, unlike the
+    old fixed 4%-stop/8%-target whose closer barrier got hit ~2/3 of the
+    time by pure noise). Returns (None, None) when ATR is unavailable so the
+    caller can decide its own fallback."""
+    if not atr or atr <= 0 or entry_price <= 0:
+        return None, None
+    stop = max(0.0, entry_price - settings.atr_stop_multiple * atr)
+    target = entry_price + settings.atr_take_profit_multiple * atr
+    return round(stop, 8), round(target, 8)
+
+
 def expectancy_stats(recent_closed: List) -> Optional[dict]:
     """Expectancy and profit factor over a set of closed positions with
     realized_pnl (net of fees). Returns None when there's nothing scored.
@@ -73,18 +87,35 @@ def performance_multiplier(recent_closed: List) -> float:
     return 1.0
 
 
-def drawdown_aware_pnl(realized_today: float, open_positions: List) -> float:
+def drawdown_aware_pnl(realized_today: float, open_positions: List, today: Optional[str] = None) -> float:
     """Numerator for the daily loss limit: today's realized P&L plus any
-    CURRENT unrealized drawdown on open positions. Unrealized gains are
-    deliberately excluded (min with 0) — paper profits must not re-arm a
-    circuit breaker that realized losses already tripped, but an account
-    bleeding through open positions shouldn't keep opening new ones just
-    because nothing has been closed yet today."""
-    unrealized = sum(
-        ((p.current_price or p.entry_price) - p.entry_price) * p.size
-        for p in open_positions
-    )
-    return realized_today + min(0.0, unrealized)
+    unrealized drawdown open positions have suffered TODAY. Unrealized gains
+    are deliberately excluded (min with 0) — paper profits must not re-arm a
+    circuit breaker that realized losses already tripped.
+
+    'Today' matters: the baseline is the position's day mark (first price
+    seen this UTC day, rolled by the position monitor), or the entry price
+    for positions opened today. A position that bled 6% over three weeks
+    must not trip the DAILY limit forever — only what it lost since this
+    morning counts. Positions with no baseline yet (monitor hasn't marked
+    them since midnight/restart) contribute nothing rather than a stale
+    since-entry number."""
+    if today is None:
+        today = datetime.now(timezone.utc).date().isoformat()
+
+    unrealized_today = 0.0
+    for p in open_positions:
+        current = p.current_price or p.entry_price
+        opened_at = getattr(p, "opened_at", None)
+        opened_today = opened_at is not None and opened_at.date().isoformat() == today
+        if opened_today:
+            baseline = p.entry_price
+        elif getattr(p, "day_mark_date", None) == today and getattr(p, "day_mark_price", None):
+            baseline = p.day_mark_price
+        else:
+            continue
+        unrealized_today += (current - baseline) * p.size
+    return realized_today + min(0.0, unrealized_today)
 
 
 def effective_usd_balance(actual_balance: float) -> float:

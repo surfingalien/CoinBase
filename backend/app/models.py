@@ -89,6 +89,21 @@ class Position(Base):
     # (those simply don't count toward any strategy's score).
     strategy = Column(String, nullable=True, index=True)
 
+    # False = hold-only: the bot tracks the position (portfolio value,
+    # exposure cap) but never sells it — no take-profit/stop-loss/trailing
+    # from the monitor and no SELL-signal closes. Synced holdings default to
+    # hold-only so registering a long-term bag can't liquidate it. NULL
+    # (rows from before this column) is treated as managed, since only
+    # bot-opened positions existed then.
+    managed = Column(Boolean, default=True)
+
+    # Rolling intraday baseline for the daily loss breaker: the first price
+    # seen on the current UTC day. Today's drawdown is measured against this
+    # mark, not the entry price — a position that slid 6% over three weeks
+    # must not trip the DAILY limit forever.
+    day_mark_price = Column(Float, nullable=True)
+    day_mark_date = Column(String, nullable=True)  # "YYYY-MM-DD" (UTC)
+
 
 class StrategyStatus(Base):
     """The evaluator's verdict on each strategy: 'active' strategies trade
