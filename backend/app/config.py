@@ -148,8 +148,9 @@ class Settings(BaseSettings):
     # (maker fee tier, ~0.35% vs ~0.6% taker) and fall back to a market order
     # for whatever hasn't filled after the timeout. Exits always stay market
     # orders — when a stop fires, getting out beats saving basis points.
-    # OFF by default: it changes live execution, so it's an explicit opt-in.
-    maker_entries_enabled: bool = False
+    # ON by default (owner opt-in): the maker path falls back to a plain
+    # market order on any failure, so worst case matches the old behaviour.
+    maker_entries_enabled: bool = True
     maker_fee_pct: float = 0.0035
     maker_fill_timeout_seconds: int = 45
 
@@ -159,8 +160,9 @@ class Settings(BaseSettings):
     # when maker entries are enabled, taker (paper_fee_pct) otherwise; exits
     # always assume taker since stops go out as market orders. Loosen with
     # care: past ~0.35 you're approving trades whose winners barely out-earn
-    # their own costs.
-    max_fee_fraction_of_target: float = 0.25
+    # their own costs. 0.30 admits the ~3.5% ATR targets the analyzer
+    # actually produces while still rejecting genuinely fee-dominated trades.
+    max_fee_fraction_of_target: float = 0.30
 
 
 settings = Settings()
