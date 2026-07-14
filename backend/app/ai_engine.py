@@ -18,7 +18,13 @@ from typing import Any, Dict
 from loguru import logger
 
 from app import sentiment as sentiment_mod
-from app.config import RISK_TIERS, settings
+from app.config import KNOWN_STRATEGIES, RISK_TIERS, settings
+
+# Strategies whose SELL signals are re-checked server-side above. Any other
+# known strategy has no exit logic here, so its SELL alerts used to fall
+# through to the default REJECT — leaving its positions exitable only by the
+# monitor's fallback percentages, never by the strategy's own exit rules.
+_SELL_AWARE_STRATEGIES = {"GainzAlgo_V2_Alpha", "Turtle_Trend", "Cross_Sectional_Momentum", "Native_TA_AI"}
 
 
 class AIEngine:
@@ -159,6 +165,21 @@ class AIEngine:
                 reasoning = signal_data.get("ta_reasoning") or "Native technical analysis confirmed the signal."
             else:
                 reasoning = f"Analysis confidence ({ta_confidence:.0%}) below the {settings.market_analysis_min_confidence:.0%} execution threshold."
+
+        # Exit signals from strategies with no server-side exit re-check are
+        # honoured rather than rejected: the pipeline already guarantees an
+        # open position exists, exits REDUCE risk, and the alternative is a
+        # position whose own strategy can never close it. Strategies with
+        # explicit SELL logic above keep their own (stricter) conditions.
+        if (
+            decision == "REJECT" and action == "SELL"
+            and strategy in KNOWN_STRATEGIES and strategy not in _SELL_AWARE_STRATEGIES
+        ):
+            decision, confidence = "EXECUTE", 0.70
+            reasoning = (
+                f"{strategy} issued an exit for its held position. Exits reduce risk and this "
+                "strategy has no server-side exit re-check — honouring the strategy's own exit rule."
+            )
 
         # Volatile alts get a smaller slice of capital regardless of strategy.
         if decision == "EXECUTE" and risk_weight > 1.0:

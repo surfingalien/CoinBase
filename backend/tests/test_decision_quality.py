@@ -27,8 +27,13 @@ def _closed(pnl):
 
 
 def _open(entry, current, size=1.0):
+    # opened_at is set explicitly (the model's default applies on DB insert,
+    # not object construction): opened today -> the breaker baselines at entry.
+    from datetime import datetime, timezone
+
     return Position(symbol="BTC-USD", side="long", size=size, entry_price=entry,
-                    current_price=current, status="open")
+                    current_price=current, status="open",
+                    opened_at=datetime.now(timezone.utc))
 
 
 # --- performance_multiplier -------------------------------------------------

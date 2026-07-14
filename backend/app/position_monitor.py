@@ -57,7 +57,10 @@ def _exit_reason(position: Position, current_price: float) -> Optional[str]:
 
 
 async def _check_and_close_positions() -> None:
+    from datetime import datetime, timezone
+
     exchange = get_exchange()
+    today = datetime.now(timezone.utc).date().isoformat()
 
     async with async_session() as session:
         open_positions = (await session.execute(
@@ -74,6 +77,17 @@ async def _check_and_close_positions() -> None:
             position.current_price = current_price
             position.unrealized_pnl = (current_price - position.entry_price) * position.size
             position.peak_price = max(position.peak_price or position.entry_price, current_price)
+
+            # Roll the intraday baseline the daily loss breaker measures
+            # against: first observed price of each UTC day.
+            if position.day_mark_date != today:
+                position.day_mark_date = today
+                position.day_mark_price = current_price
+
+            # Hold-only positions (synced holdings) are marked to market
+            # above but NEVER sold by the monitor.
+            if position.managed is False:
+                continue
 
             reason = _exit_reason(position, current_price)
             if reason is None:
