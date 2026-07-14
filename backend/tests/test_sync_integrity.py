@@ -33,6 +33,9 @@ def _fixed_market(monkeypatch):
 
     monkeypatch.setattr(market_data, "fetch_last_price", fake_price)
     monkeypatch.setattr(settings, "paper_fee_pct", FEE_PCT)
+    # These tests pin taker economics on every fill regardless of the
+    # maker-entries default.
+    monkeypatch.setattr(settings, "maker_entries_enabled", False)
 
 
 class StubSession:
