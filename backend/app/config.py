@@ -153,6 +153,15 @@ class Settings(BaseSettings):
     maker_fee_pct: float = 0.0035
     maker_fill_timeout_seconds: int = 45
 
+    # Fee-expectancy guard: an entry is rejected when the assumed round-trip
+    # fees would consume at least this fraction of the distance to its
+    # take-profit. The round trip is maker-aware — entry at maker_fee_pct
+    # when maker entries are enabled, taker (paper_fee_pct) otherwise; exits
+    # always assume taker since stops go out as market orders. Loosen with
+    # care: past ~0.35 you're approving trades whose winners barely out-earn
+    # their own costs.
+    max_fee_fraction_of_target: float = 0.25
+
 
 settings = Settings()
 

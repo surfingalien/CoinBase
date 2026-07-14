@@ -13,8 +13,8 @@ import pytest
 from app.config import settings
 from app.models import Position
 from app.risk import (
-    MAX_FEE_FRACTION_OF_TARGET,
     PERFORMANCE_MIN_TRADES,
+    assumed_round_trip_fee_pct,
     drawdown_aware_pnl,
     performance_multiplier,
     size_trade,
@@ -92,21 +92,45 @@ def test_daily_loss_limit_trips_on_open_drawdown(monkeypatch):
 # --- fee-aware expectancy ---------------------------------------------------
 
 def test_size_trade_rejects_fee_dominated_target():
-    # 0.6%/side fees = 1.2% round trip vs a 1% take-profit: fees are >25%
-    # of the target — negative expectancy, must reject.
+    # 1.2% round trip vs a 1% take-profit: fees are >25% of the target —
+    # negative expectancy, must reject.
     result = size_trade(ai_confidence=0.8, ai_size_multiplier=1.0,
-                        usd_balance=10000.0, fee_pct=0.006, take_profit_pct=0.01)
+                        usd_balance=10000.0, round_trip_fee_pct=0.012, take_profit_pct=0.01)
     assert result.rejected
     assert "fees" in result.reason.lower()
 
 
-def test_size_trade_accepts_target_clear_of_fees():
+def test_size_trade_accepts_target_clear_of_fees(monkeypatch):
     # 1.2% round trip vs an 8% target = 15% of the target, under the cap.
-    assert 2 * 0.006 < 0.08 * MAX_FEE_FRACTION_OF_TARGET
+    monkeypatch.setattr(settings, "max_fee_fraction_of_target", 0.25)
     result = size_trade(ai_confidence=0.8, ai_size_multiplier=1.0,
-                        usd_balance=10000.0, fee_pct=0.006, take_profit_pct=0.08)
+                        usd_balance=10000.0, round_trip_fee_pct=0.012, take_profit_pct=0.08)
     assert not result.rejected
     assert result.quote_size_usd > 0
+
+
+def test_round_trip_fee_is_maker_aware(monkeypatch):
+    monkeypatch.setattr(settings, "paper_fee_pct", 0.006)
+    monkeypatch.setattr(settings, "maker_fee_pct", 0.0035)
+    monkeypatch.setattr(settings, "maker_entries_enabled", False)
+    assert assumed_round_trip_fee_pct() == pytest.approx(0.012)   # taker both sides
+    monkeypatch.setattr(settings, "maker_entries_enabled", True)
+    assert assumed_round_trip_fee_pct() == pytest.approx(0.0095)  # maker in, taker out
+
+
+def test_fee_threshold_is_configurable_378bp_target_case(monkeypatch):
+    """The reported live rejection: 3.78% ATR target, taker fees 1.2% round
+    trip -> blocked at the default 25% threshold. With maker entries on
+    (0.95% round trip) and the threshold at 30%, the same trade passes."""
+    monkeypatch.setattr(settings, "max_fee_fraction_of_target", 0.25)
+    result = size_trade(ai_confidence=0.8, ai_size_multiplier=1.0,
+                        usd_balance=10000.0, round_trip_fee_pct=0.012, take_profit_pct=0.0378)
+    assert result.rejected
+
+    monkeypatch.setattr(settings, "max_fee_fraction_of_target", 0.30)
+    result = size_trade(ai_confidence=0.8, ai_size_multiplier=1.0,
+                        usd_balance=10000.0, round_trip_fee_pct=0.0095, take_profit_pct=0.0378)
+    assert not result.rejected
 
 
 def test_size_trade_skips_fee_check_when_unknown():

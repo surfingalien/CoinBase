@@ -19,6 +19,7 @@ from app.exchange import get_exchange
 from app.models import Order, Position, Signal
 from app.risk import (
     PERFORMANCE_LOOKBACK_TRADES,
+    assumed_round_trip_fee_pct,
     compute_daily_pnl_pct,
     effective_usd_balance,
     performance_multiplier,
@@ -217,7 +218,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             ai_size_multiplier=size_multiplier,
             usd_balance=usd_balance,
             daily_pnl_pct=daily_pnl_pct,
-            fee_pct=settings.paper_fee_pct,
+            round_trip_fee_pct=assumed_round_trip_fee_pct(),
             take_profit_pct=take_profit_pct,
             open_position_value=open_position_value,
         )
