@@ -611,6 +611,7 @@ async def get_config():
             "strategy_eval_window_days": settings.strategy_eval_window_days,
             "max_total_exposure_pct": settings.max_total_exposure_pct,
             "maker_entries_enabled": settings.maker_entries_enabled,
+            "max_fee_fraction_of_target": settings.max_fee_fraction_of_target,
         },
         "cross_sectional": {
             # The only new feature that can open positions on its own. Surfaced

@@ -21,10 +21,14 @@ class SizingResult:
 
 MIN_TRADE_SIZE_USD = 10.0
 
-# An entry is rejected when the round-trip fees would eat at least this
-# fraction of the distance to its take-profit — past that, the trade needs
-# an outsized hit rate just to cover costs.
-MAX_FEE_FRACTION_OF_TARGET = 0.25
+
+def assumed_round_trip_fee_pct() -> float:
+    """The fee cost of one complete trade, matching how orders actually go
+    out: the entry pays the maker tier when maker entries are enabled
+    (post-only limit at the bid), taker otherwise; the exit always assumes
+    taker because stops and take-profits leave as market orders."""
+    entry_fee = settings.maker_fee_pct if settings.maker_entries_enabled else settings.paper_fee_pct
+    return entry_fee + settings.paper_fee_pct
 
 # How many of a strategy's most recent closed trades feed its performance
 # score, and how many it must have before the score affects sizing at all.
@@ -160,24 +164,25 @@ def size_trade(
     ai_size_multiplier: float,
     usd_balance: float,
     daily_pnl_pct: float = 0.0,
-    fee_pct: float = 0.0,
+    round_trip_fee_pct: float = 0.0,
     take_profit_pct: float = 0.0,
     open_position_value: float = 0.0,
 ) -> SizingResult:
     if daily_pnl_pct <= -settings.max_daily_loss_pct:
         return SizingResult(0.0, True, f"Daily loss limit reached ({daily_pnl_pct:.1%}). Trading paused for the day.")
 
-    # Expectancy after costs: fees are charged on both sides, so a target
-    # barely past the round-trip friction is a losing proposition even when
-    # the signal is right. Applies whenever the caller knows both numbers.
-    if fee_pct > 0 and take_profit_pct > 0:
-        round_trip_fees = 2 * fee_pct
-        if round_trip_fees >= take_profit_pct * MAX_FEE_FRACTION_OF_TARGET:
+    # Expectancy after costs: a target barely past the round-trip friction is
+    # a losing proposition even when the signal is right. The caller supplies
+    # the round trip (see assumed_round_trip_fee_pct — maker-aware on entry,
+    # taker on exit); the allowed fraction of the target is configurable.
+    if round_trip_fee_pct > 0 and take_profit_pct > 0:
+        if round_trip_fee_pct >= take_profit_pct * settings.max_fee_fraction_of_target:
             return SizingResult(
                 0.0, True,
-                f"Round-trip fees ({round_trip_fees:.2%}) would consume "
-                f">={MAX_FEE_FRACTION_OF_TARGET:.0%} of the {take_profit_pct:.2%} "
-                f"take-profit distance — negative expectancy after costs.",
+                f"Round-trip fees ({round_trip_fee_pct:.2%}) would consume "
+                f">={settings.max_fee_fraction_of_target:.0%} of the {take_profit_pct:.2%} "
+                f"take-profit distance — negative expectancy after costs. "
+                f"(Fees assumed: {'maker entry + taker exit' if settings.maker_entries_enabled else 'taker both sides'}.)",
             )
 
     raw_size = settings.base_trade_size_usd * ai_size_multiplier * ai_confidence
