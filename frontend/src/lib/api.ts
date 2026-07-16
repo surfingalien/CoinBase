@@ -138,6 +138,33 @@ export interface ValidationResult {
   error?: string;
 }
 
+export interface CompareSnapshot {
+  symbol: string;
+  price: number;
+  rsi: number | null;
+  macd_trend: string | null;
+  adx: number | null;
+  atr: number | null;
+  above_ema50: boolean | null;
+  above_ema200: boolean | null;
+  higher_timeframe_trend: string | null;
+  rule_verdict: { signal: string; confidence: number; reasoning: string };
+  returns: Record<string, number>;
+}
+
+export interface CompareResult {
+  a: CompareSnapshot;
+  b: CompareSnapshot;
+  ai_view: string | null;
+  note: string;
+}
+
+export interface AuditVerify {
+  valid: boolean;
+  events: number;
+  first_break: { seq: number; reason: string } | null;
+}
+
 // Strategies backtest.py can validate (mirrors backend BUILDERS).
 export const BACKTESTABLE_STRATEGIES = [
   "GainzAlgo_V2_Alpha",
@@ -173,6 +200,9 @@ export const api = {
   config: () => getJSON<Config>("/api/config"),
   validate: (symbol: string, strategy: string) =>
     getJSON<ValidationResult>(`/api/validate?symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}`),
+  compare: (a: string, b: string) =>
+    getJSON<CompareResult>(`/api/analyze/compare?symbol_a=${encodeURIComponent(a)}&symbol_b=${encodeURIComponent(b)}`),
+  auditVerify: () => getJSON<AuditVerify>("/api/audit/verify"),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
   syncHoldings: () => postJSON<{
     synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];

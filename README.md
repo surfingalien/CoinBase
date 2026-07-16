@@ -54,10 +54,13 @@ backend/         FastAPI app (paper + live trading engine)
     cross_sectional.py     ranks the whole universe by 12-1 relative-strength momentum
     cross_sectional_monitor.py  background loop: opt-in monthly momentum rebalance
     backtest.py            pre-deploy validation: IS/OOS Sharpe, drawdown, overfit checks
+    audit.py               tamper-evident SHA-256 hash-chained audit trail of every
+                           pipeline step (signal -> gates -> AI -> risk -> order -> close)
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats,
                     /api/positions/history, /api/momentum/rankings, /api/validate,
+                    /api/audit, /api/audit/verify, /api/analyze/compare,
                     /api/config; POST /api/reset
     main.py         FastAPI app wiring
 frontend/        React + Vite + Tailwind dashboard (Dashboard / Portfolio /

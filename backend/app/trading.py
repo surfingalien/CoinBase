@@ -11,7 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import regime, strategy_evaluator, strategy_gate
+from app import audit, regime, strategy_evaluator, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -34,6 +34,10 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
     )
     if not order_result.get("success"):
         logger.error(f"Close failed for {position.symbol}: {order_result.get('error')}")
+        await audit.record(session, "order_failed", symbol=position.symbol, payload={
+            "side": "SELL", "size": position.size, "reason": reason,
+            "error": str(order_result.get("error")),
+        })
         return False
 
     exit_price = order_result["avg_price"]
@@ -60,6 +64,15 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
     position.status = "closed"
     position.closed_at = datetime.now(timezone.utc)
     position.exit_reason = reason
+    await audit.record(session, "position_closed", symbol=position.symbol, payload={
+        "position_id": position.id,
+        "size": position.size,
+        "entry_price": position.entry_price,
+        "exit_price": exit_price,
+        "realized_pnl": position.realized_pnl,
+        "exit_reason": reason,
+        "is_live": exchange.is_live,
+    })
     return True
 
 
@@ -78,14 +91,21 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             status="processing",
         )
         session.add(signal)
+        await audit.record(session, "signal_received", signal_id=signal_id, symbol=symbol, payload={
+            "action": action,
+            "strategy": signal_data.get("strategy", "Unknown"),
+            "price": signal_data.get("price"),
+        })
         await session.commit()
 
-        def reject(reason: str) -> None:
+        async def reject(reason: str) -> None:
             signal.status = "rejected"
             signal.ai_reasoning = reason
+            await audit.record(session, "signal_rejected", signal_id=signal_id,
+                               symbol=symbol, payload={"reason": reason})
 
         if symbol not in ALLOWED_PAIRS:
-            reject(f"{symbol} is not in the approved trading universe.")
+            await reject(f"{symbol} is not in the approved trading universe.")
             await session.commit()
             return
 
@@ -97,11 +117,11 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         # Portfolio-structure guards run before spending an AI/LLM call.
         if action == "BUY":
             if open_for_symbol:
-                reject(f"Already holding an open {symbol} position — no stacking.")
+                await reject(f"Already holding an open {symbol} position — no stacking.")
                 await session.commit()
                 return
             if len(open_positions) >= settings.max_open_positions:
-                reject(f"Max open positions ({settings.max_open_positions}) reached.")
+                await reject(f"Max open positions ({settings.max_open_positions}) reached.")
                 await session.commit()
                 return
 
@@ -110,7 +130,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             strategy_name = signal_data.get("strategy", "Unknown")
             demotion_reason = await strategy_evaluator.is_demoted(session, strategy_name)
             if demotion_reason:
-                reject(f"[Strategy evaluator: {strategy_name} is demoted — {demotion_reason}]")
+                await reject(f"[Strategy evaluator: {strategy_name} is demoted — {demotion_reason}]")
                 await session.commit()
                 logger.info(f"Signal {signal_id} blocked: {strategy_name} demoted")
                 return
@@ -120,7 +140,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             # the AI call so blocked entries don't spend LLM tokens.
             allowed, regime_reason, _ = await regime.check_entry(symbol, strategy_name)
             if not allowed:
-                reject(regime_reason)
+                await reject(regime_reason)
                 await session.commit()
                 logger.info(f"Signal {signal_id} blocked by regime filter: {regime_reason}")
                 return
@@ -129,7 +149,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             # harness before real capital is risked on it.
             allowed, gate_reason = await strategy_gate.check(strategy_name, symbol)
             if not allowed:
-                reject(gate_reason)
+                await reject(gate_reason)
                 await session.commit()
                 logger.info(f"Signal {signal_id} blocked by validation gate: {gate_reason}")
                 return
@@ -138,11 +158,11 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             # sold by the bot — not by the monitor, not by SELL signals.
             sellable = [p for p in open_for_symbol if p.managed is not False]
             if not open_for_symbol:
-                reject("No open position to sell — long-only system, shorting not supported.")
+                await reject("No open position to sell — long-only system, shorting not supported.")
                 await session.commit()
                 return
             if not sellable:
-                reject(
+                await reject(
                     f"The open {symbol} position is hold-only (synced without exit "
                     f"management) — the bot will not sell it. Re-sync with "
                     f"?manage_exits=true to hand its exits to the bot."
@@ -151,7 +171,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
                 return
             open_for_symbol = sellable
         else:
-            reject(f"Unsupported action '{action}'.")
+            await reject(f"Unsupported action '{action}'.")
             await session.commit()
             return
 
@@ -159,6 +179,13 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         signal.ai_decision = ai_result["decision"]
         signal.ai_confidence = ai_result["confidence"]
         signal.ai_reasoning = ai_result["reasoning"]
+        await audit.record(session, "ai_decision", signal_id=signal_id, symbol=symbol, payload={
+            "decision": ai_result["decision"],
+            "confidence": ai_result["confidence"],
+            "size_multiplier": ai_result["size_multiplier"],
+            "reasoning": ai_result["reasoning"],
+            "verification": ai_result.get("verification"),
+        })
 
         if ai_result["decision"] != "EXECUTE":
             signal.status = "rejected"
@@ -222,8 +249,16 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             take_profit_pct=take_profit_pct,
             open_position_value=open_position_value,
         )
+        await audit.record(session, "risk_check", signal_id=signal_id, symbol=symbol, payload={
+            "accepted": not sizing.rejected,
+            "quote_size_usd": None if sizing.rejected else sizing.quote_size_usd,
+            "reason": sizing.reason if sizing.rejected else None,
+            "usd_balance": usd_balance,
+            "daily_pnl_pct": daily_pnl_pct,
+            "performance_multiplier": perf_mult,
+        })
         if sizing.rejected:
-            reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
+            await reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
             await session.commit()
             logger.info(f"Signal {signal_id} rejected by risk manager: {sizing.reason}")
             return
@@ -234,11 +269,23 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         if not order_result.get("success"):
             signal.status = "failed"
             signal.ai_reasoning = f"{signal.ai_reasoning} [Order failed: {order_result.get('error')}]"
+            await audit.record(session, "order_failed", signal_id=signal_id, symbol=symbol, payload={
+                "side": "BUY", "quote_size_usd": sizing.quote_size_usd,
+                "error": str(order_result.get("error")),
+            })
             await session.commit()
             return
 
         entry_price = order_result["avg_price"]
         entry_fees = order_result.get("fees_usd") or 0.0
+        await audit.record(session, "order_filled", signal_id=signal_id, symbol=symbol, payload={
+            "side": "BUY",
+            "quote_size_usd": sizing.quote_size_usd,
+            "filled_size": order_result["filled_size"],
+            "avg_fill_price": entry_price,
+            "fees_usd": entry_fees,
+            "is_live": exchange.is_live,
+        })
         session.add(Order(
             signal_id=signal_id,
             symbol=symbol,

@@ -1,11 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, select
 
-from app import sentiment as sentiment_mod
+from app import audit as audit_mod, sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from app.exchange import CoinbaseExchange, MockExchange, get_exchange
-from app.models import Order, Position, Signal
+from app.models import AuditEvent, Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
 router = APIRouter(prefix="/api", tags=["data"])
@@ -222,6 +222,10 @@ async def reset_paper_trading():
         await session.execute(delete(Signal))
         await session.execute(delete(Order))
         await session.execute(delete(Position))
+        # The audit chain restarts from genesis with the rest of the paper
+        # slate — keeping it would leave a chain full of dangling signal ids.
+        # Live mode never reaches this handler, so real history stays intact.
+        await session.execute(delete(AuditEvent))
         await session.commit()
 
     if isinstance(exchange, MockExchange):
@@ -411,6 +415,110 @@ async def reconcile():
             "— POST /api/sync-holdings can register them)."
         ),
     }
+
+
+@router.get("/audit")
+async def get_audit_trail(limit: int = 50, signal_id: str | None = None):
+    """The tamper-evident audit chain, newest first. Every pipeline step —
+    signal received, gate/AI/risk verdicts, order fills, position closes —
+    is a hash-chained event; /api/audit/verify proves none were altered."""
+    async with async_session() as session:
+        query = select(AuditEvent).order_by(AuditEvent.seq.desc()).limit(limit)
+        if signal_id:
+            query = select(AuditEvent).where(AuditEvent.signal_id == signal_id).order_by(AuditEvent.seq.asc())
+        events = (await session.execute(query)).scalars().all()
+        return [
+            {
+                "seq": e.seq,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "event_type": e.event_type,
+                "signal_id": e.signal_id,
+                "symbol": e.symbol,
+                "payload": e.payload,
+                "prev_hash": e.prev_hash,
+                "hash": e.hash,
+            }
+            for e in events
+        ]
+
+
+@router.get("/audit/verify")
+async def verify_audit_trail():
+    """Recomputes the entire audit hash chain. valid=true proves no recorded
+    event was altered, deleted, or reordered since it was written; on a
+    break, first_break pinpoints the earliest bad link."""
+    async with async_session() as session:
+        return await audit_mod.verify_chain(session)
+
+
+@router.get("/analyze/compare")
+async def analyze_compare(symbol_a: str = "BTC-USD", symbol_b: str = "ETH-USD"):
+    """Ask-the-AI pair comparison: full indicator snapshots, rule-based
+    verdicts, and recent relative performance for two symbols side by side,
+    plus (when Claude is configured) a short comparative read. Read-only —
+    never places an order."""
+    from app import market_analysis, market_data
+
+    for sym in (symbol_a, symbol_b):
+        if sym not in ALLOWED_PAIRS:
+            raise HTTPException(status_code=400, detail=f"{sym} is not in the allowed universe.")
+    if symbol_a == symbol_b:
+        raise HTTPException(status_code=400, detail="Pick two different symbols to compare.")
+
+    async def snapshot(symbol: str) -> dict:
+        prep = await market_analysis._prepare_symbol(symbol)
+        if prep is None:
+            raise HTTPException(status_code=502, detail=f"Not enough candle data for {symbol}.")
+        daily = await market_data.fetch_candles(symbol, 86400)
+        returns = {}
+        if daily and len(daily["closes"]) > 1:
+            closes = daily["closes"]
+            for label, days in (("7d", 7), ("30d", 30)):
+                if len(closes) > days:
+                    returns[label] = closes[-1] / closes[-1 - days] - 1
+        ind = prep["indicators"]
+        macd = ind.get("macd") or {}
+        return {
+            "symbol": symbol,
+            "price": prep["price"],
+            "rsi": ind.get("rsi"),
+            "macd_trend": macd.get("trend"),
+            "adx": ind.get("adx"),
+            "atr": ind.get("atr"),
+            "above_ema50": prep["price"] > ind["ema50"] if ind.get("ema50") else None,
+            "above_ema200": prep["price"] > ind["ema200"] if ind.get("ema200") else None,
+            "higher_timeframe_trend": prep["htf_trend"],
+            "rule_verdict": prep["rule_result"],
+            "returns": returns,
+            "ta_line": prep["ta_line"],
+        }
+
+    a, b = await snapshot(symbol_a), await snapshot(symbol_b)
+
+    ai_view = None
+    if settings.anthropic_api_key:
+        try:
+            client = market_analysis._get_anthropic_client()
+            prompt = (
+                "You are a concise crypto analyst. Compare these two assets strictly "
+                "from the data given — do not invent facts.\n"
+                f"A: {a['ta_line']} returns={a['returns']}\n"
+                f"B: {b['ta_line']} returns={b['returns']}\n"
+                "In 2-3 sentences: which currently has the stronger technical posture "
+                "and why, citing the specific indicators that decide it. This is "
+                "analysis, not financial advice — no position recommendations."
+            )
+            response = await client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=250,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            ai_view = "".join(bl.text for bl in response.content if bl.type == "text").strip() or None
+        except Exception:
+            ai_view = None  # comparison stays useful on indicators alone
+
+    return {"a": a, "b": b, "ai_view": ai_view,
+            "note": "Read-only analysis. Not financial advice; never places orders."}
 
 
 @router.get("/ai-selftest")
