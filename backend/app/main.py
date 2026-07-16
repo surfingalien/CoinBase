@@ -6,9 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app import cross_sectional_monitor, market_analysis_monitor, position_monitor, strategy_evaluator
+from app import (
+    cross_sectional_monitor, market_analysis_monitor, notifier, position_monitor,
+    strategy_evaluator, telegram_bot,
+)
 from app.database import init_db
-from app.exchange import reconcile_paper_state
+from app.exchange import get_exchange, reconcile_paper_state
 from app.routers import data, webhook
 
 
@@ -23,7 +26,11 @@ async def lifespan(app: FastAPI):
     market_analysis_monitor.start()
     cross_sectional_monitor.start()
     strategy_evaluator.start()
+    telegram_bot.start()
+    if notifier.alerts_configured():
+        await notifier.notify_event(notifier.format_startup(get_exchange().is_live))
     yield
+    await telegram_bot.stop()
     await position_monitor.stop()
     await market_analysis_monitor.stop()
     await cross_sectional_monitor.stop()

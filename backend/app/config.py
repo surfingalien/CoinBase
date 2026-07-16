@@ -164,6 +164,22 @@ class Settings(BaseSettings):
     # actually produces while still rejecting genuinely fee-dominated trades.
     max_fee_fraction_of_target: float = 0.30
 
+    # ── Telegram bot gateway ────────────────────────────────────────────────
+    # Push trade/exit alerts and answer read-only commands (/status, /pnl,
+    # /positions) plus the /pause /resume kill-switch from a chat. All optional:
+    # with no token the notifier is a silent no-op and the bot loop never
+    # starts. Create a bot via @BotFather for the token; send it a message and
+    # read the chat id from https://api.telegram.org/bot<token>/getUpdates.
+    telegram_bot_token: str = ""
+    # Only this chat may issue commands and receive alerts. Leaving it blank
+    # disables the command bot (commands would have no authorized chat) but
+    # still lets alerts go out once it's set.
+    telegram_chat_id: str = ""
+    telegram_alerts_enabled: bool = True
+    # Long-poll timeout for getUpdates. Telegram holds the request open this
+    # long waiting for a message, so the loop isn't a busy-poll.
+    telegram_poll_timeout_seconds: int = 30
+
 
 settings = Settings()
 

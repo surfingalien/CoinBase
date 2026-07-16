@@ -203,6 +203,9 @@ export const api = {
   compare: (a: string, b: string) =>
     getJSON<CompareResult>(`/api/analyze/compare?symbol_a=${encodeURIComponent(a)}&symbol_b=${encodeURIComponent(b)}`),
   auditVerify: () => getJSON<AuditVerify>("/api/audit/verify"),
+  controls: () => getJSON<{ trading_paused: boolean; telegram_alerts_configured: boolean }>("/api/controls"),
+  pauseTrading: (paused: boolean) =>
+    postJSON<{ trading_paused: boolean }>(`/api/controls/pause?paused=${paused}`),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
   syncHoldings: () => postJSON<{
     synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
