@@ -11,7 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import audit, regime, strategy_evaluator, strategy_gate
+from app import audit, controls, notifier, regime, strategy_evaluator, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -73,6 +73,15 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
         "exit_reason": reason,
         "is_live": exchange.is_live,
     })
+    # Push an exit alert (covers both SELL-signal and monitor auto-exits, since
+    # both close through here). No-op when Telegram isn't configured.
+    pnl_pct = (
+        (exit_price - position.entry_price) / position.entry_price
+        if position.entry_price else None
+    )
+    await notifier.notify_event(notifier.format_exit(
+        position.symbol, reason, exit_price, position.realized_pnl, pnl_pct, exchange.is_live,
+    ))
     return True
 
 
@@ -116,6 +125,14 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
 
         # Portfolio-structure guards run before spending an AI/LLM call.
         if action == "BUY":
+            # Kill-switch: when trading is paused (dashboard or Telegram
+            # /pause), no new entries open. Exits are never paused — a held
+            # position must always be closeable.
+            if await controls.is_trading_paused(session):
+                await reject("Trading is paused — new entries are blocked. Resume to trade.")
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked: trading paused")
+                return
             if open_for_symbol:
                 await reject(f"Already holding an open {symbol} position — no stacking.")
                 await session.commit()
@@ -313,3 +330,6 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         signal.status = "executed"
         await session.commit()
         logger.info(f"Signal {signal_id} executed: BUY {symbol} for ${sizing.quote_size_usd:.2f}")
+        await notifier.notify_event(notifier.format_entry(
+            symbol, strategy, sizing.quote_size_usd, entry_price, ai_result["confidence"],
+        ))

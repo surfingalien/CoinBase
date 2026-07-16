@@ -909,12 +909,57 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
     }
   };
 
+  const [paused, setPaused] = useState<boolean | null>(null);
+  const [telegramOn, setTelegramOn] = useState(false);
+  const [pauseBusy, setPauseBusy] = useState(false);
+  useEffect(() => {
+    api.controls().then((c) => { setPaused(c.trading_paused); setTelegramOn(c.telegram_alerts_configured); }).catch(() => {});
+  }, []);
+  const togglePause = async () => {
+    if (paused === null) return;
+    setPauseBusy(true);
+    try {
+      const r = await api.pauseTrading(!paused);
+      setPaused(r.trading_paused);
+    } catch { /* leave prior state */ }
+    finally { setPauseBusy(false); }
+  };
+
   if (isLoading && !config) {
     return <Card className="glass p-8 space-y-4"><Skeleton className="h-4 w-32" /><Skeleton className="h-32 w-full" /></Card>;
   }
   if (!config) return null;
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <SectionCard title="Trading Controls" icon={Shield} badge={
+        paused === null ? null : <Badge variant={paused ? "warning" : "success"}>{paused ? "PAUSED" : "ACTIVE"}</Badge>
+      }>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-foreground-muted leading-relaxed">
+            Pause blocks all new entries immediately. Open positions still exit
+            normally — take-profit, stop-loss, and trailing stops keep running.
+            The same switch is on the Telegram <code>/pause</code> and <code>/resume</code> commands.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={togglePause}
+              disabled={pauseBusy || paused === null}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all disabled:opacity-50",
+                paused ? "bg-success text-white hover:bg-success/90" : "bg-warning text-white hover:bg-warning/90",
+              )}
+            >
+              {paused ? <Zap className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+              {pauseBusy ? "Working…" : paused ? "Resume trading" : "Pause trading"}
+            </button>
+            <Badge variant={telegramOn ? "success" : "default"}>
+              {telegramOn ? "Telegram alerts on" : "Telegram not configured"}
+            </Badge>
+          </div>
+        </div>
+      </SectionCard>
+
       <SectionCard title="Trading Mode" icon={Bot} badge={
         <Badge variant={config.is_live ? "danger" : "warning"}>{config.is_live ? "LIVE TRADING" : "PAPER TRADING"}</Badge>
       }>

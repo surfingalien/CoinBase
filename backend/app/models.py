@@ -130,6 +130,17 @@ class AuditEvent(Base):
     hash = Column(String(64), index=True)
 
 
+class SystemState(Base):
+    """Tiny key/value store for runtime control flags that must survive a
+    restart — currently just the trading pause switch toggled from the
+    dashboard or the Telegram /pause command. One row per key."""
+    __tablename__ = "system_state"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=_now)
+
+
 class StrategyStatus(Base):
     """The evaluator's verdict on each strategy: 'active' strategies trade
     normally; 'demoted' ones are blocked from opening new positions until the

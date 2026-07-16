@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, select
 
-from app import audit as audit_mod, sentiment as sentiment_mod
+from app import audit as audit_mod, controls as controls_mod, notifier as notifier_mod, sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from app.exchange import CoinbaseExchange, MockExchange, get_exchange
@@ -415,6 +415,29 @@ async def reconcile():
             "— POST /api/sync-holdings can register them)."
         ),
     }
+
+
+@router.get("/controls")
+async def get_controls():
+    """Runtime control state for the dashboard — currently the trading pause
+    switch and whether Telegram alerts are wired up."""
+    async with async_session() as session:
+        paused = await controls_mod.is_trading_paused(session)
+    return {
+        "trading_paused": paused,
+        "telegram_alerts_configured": notifier_mod.alerts_configured(),
+    }
+
+
+@router.post("/controls/pause")
+async def pause_trading(paused: bool = True):
+    """Pause or resume new-entry trading. Exits are never affected — open
+    positions always close normally. Mirrors the Telegram /pause /resume
+    commands so the switch is reachable from the dashboard too."""
+    async with async_session() as session:
+        await controls_mod.set_trading_paused(session, paused, by="dashboard")
+    await notifier_mod.notify_event(notifier_mod.format_paused(paused, by="dashboard"))
+    return {"trading_paused": paused}
 
 
 @router.get("/audit")
