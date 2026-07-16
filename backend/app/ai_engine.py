@@ -166,6 +166,53 @@ class AIEngine:
             else:
                 reasoning = f"Analysis confidence ({ta_confidence:.0%}) below the {settings.market_analysis_min_confidence:.0%} execution threshold."
 
+        # Cross-method verification: an LLM-produced Native_TA_AI entry must
+        # survive the independent rule-based read of the same indicators
+        # before capital moves. This is a genuine second opinion, not a
+        # fallback — it runs precisely when the LLM path succeeded. Exits are
+        # exempt: a SELL reduces risk, and blocking it on a disagreement
+        # would strand the position.
+        verification = None
+        if strategy == "Native_TA_AI" and signal_data.get("llm_generated"):
+            rule_signal = signal_data.get("rule_signal")
+            verification = {
+                "method": "rule_confluence",
+                "rule_signal": rule_signal,
+                "outcome": "agree" if action == "BUY" else "exit_exempt",
+            }
+            if decision == "EXECUTE" and action == "BUY":
+                if rule_signal == "SELL":
+                    # Outright contradiction: the same indicators read
+                    # bearish without the LLM. Never trade into that.
+                    decision, confidence = "REJECT", 0.0
+                    verification["outcome"] = "contradiction_veto"
+                    reasoning += (
+                        " [Verification: the independent rule-based read of the same "
+                        "indicators is SELL — contradiction vetoes the entry.]"
+                    )
+                elif rule_signal != "BUY":
+                    # The rules see chop where the LLM sees a setup. Trade it
+                    # only if the damped confidence still clears the bar, at
+                    # reduced size.
+                    confidence *= 0.85
+                    size_multiplier *= 0.6
+                    verification["outcome"] = "unconfirmed_damped"
+                    if confidence < settings.market_analysis_min_confidence:
+                        decision = "REJECT"
+                        verification["outcome"] = "unconfirmed_rejected"
+                        reasoning += (
+                            " [Verification: rule-based check reads HOLD; damped "
+                            f"confidence ({confidence:.0%}) no longer clears the "
+                            f"{settings.market_analysis_min_confidence:.0%} threshold.]"
+                        )
+                    else:
+                        reasoning += (
+                            " [Verification: rule-based check reads HOLD — entry kept "
+                            "at reduced confidence and 0.6x size.]"
+                        )
+                else:
+                    reasoning += " [Verification: independent rule-based check agrees.]"
+
         # Exit signals from strategies with no server-side exit re-check are
         # honoured rather than rejected: the pipeline already guarantees an
         # open position exists, exits REDUCE risk, and the alternative is a
@@ -216,6 +263,7 @@ class AIEngine:
             "reasoning": reasoning,
             "final_action": action if decision == "EXECUTE" else "HOLD",
             "size_multiplier": size_multiplier,
+            "verification": verification,
         }
 
     async def _refine_with_llm(self, signal_data: Dict[str, Any], decision: str, rule_based_reasoning: str) -> str:

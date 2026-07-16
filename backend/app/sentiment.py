@@ -44,8 +44,19 @@ async def _fetch_fear_greed(client: httpx.AsyncClient) -> Optional[Dict[str, Any
         return None
 
 
-async def _fetch_headlines(client: httpx.AsyncClient) -> List[str]:
-    headlines: List[str] = []
+def _feed_source(url: str) -> str:
+    if "coindesk" in url:
+        return "CoinDesk"
+    if "cointelegraph" in url:
+        return "Cointelegraph"
+    return url
+
+
+async def _fetch_headlines(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    """Structured headline evidence: every item keeps its source, link, and
+    publish time so any sentiment-influenced decision can be traced back to
+    the exact story that informed it — not just 'the news was bearish'."""
+    headlines: List[Dict[str, Any]] = []
     for url in NEWS_FEEDS:
         try:
             resp = await client.get(url, headers={"User-Agent": "GainzAI/1.0"})
@@ -54,7 +65,12 @@ async def _fetch_headlines(client: httpx.AsyncClient) -> List[str]:
             for item in root.iter("item"):
                 title = item.findtext("title")
                 if title:
-                    headlines.append(title.strip())
+                    headlines.append({
+                        "title": title.strip(),
+                        "source": _feed_source(url),
+                        "url": (item.findtext("link") or "").strip() or None,
+                        "published": (item.findtext("pubDate") or "").strip() or None,
+                    })
                 if len(headlines) >= MAX_HEADLINES:
                     return headlines
         except Exception:
@@ -113,5 +129,9 @@ def prompt_section(sentiment: Optional[Dict[str, Any]]) -> str:
     headlines = sentiment.get("headlines") or []
     if headlines:
         lines.append("- Recent crypto headlines:")
-        lines.extend(f"  * {h}" for h in headlines)
+        for h in headlines:
+            if isinstance(h, dict):
+                lines.append(f"  * {h['title']} [{h.get('source', '?')}]")
+            else:  # pre-evidence cache entries were plain strings
+                lines.append(f"  * {h}")
     return "\n".join(lines) + "\n" if len(lines) > 1 else ""

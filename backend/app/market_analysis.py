@@ -394,10 +394,12 @@ async def _prepare_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _to_signal(prep: Dict[str, Any], analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _to_signal(prep: Dict[str, Any], analysis: Dict[str, Any],
+               llm_generated: bool) -> Optional[Dict[str, Any]]:
     action = analysis.get("signal")
     if action not in ("BUY", "SELL"):
         return None
+    rule = prep["rule_result"]
     return {
         "symbol": prep["symbol"],
         "action": action,
@@ -408,6 +410,12 @@ def _to_signal(prep: Dict[str, Any], analysis: Dict[str, Any]) -> Optional[Dict[
         "ta_reasoning": analysis.get("reasoning"),
         "ta_stop_loss": analysis.get("stopLoss"),
         "ta_take_profit": analysis.get("takeProfit"),
+        # Cross-method verification context: the independent rule-based read
+        # of the same indicators rides along so the decision engine can check
+        # an LLM-produced signal against it before any order is placed.
+        "llm_generated": llm_generated,
+        "rule_signal": rule["signal"],
+        "rule_confidence": (rule.get("confidence") or 0) / 100,
     }
 
 
@@ -440,8 +448,9 @@ async def analyze_market(symbols: List[str]) -> List[Dict[str, Any]]:
 
     signals: List[Dict[str, Any]] = []
     for prep in preps:
-        analysis = llm_results.get(prep["symbol"]) or prep["rule_result"]
-        signal = _to_signal(prep, analysis)
+        llm_analysis = llm_results.get(prep["symbol"])
+        analysis = llm_analysis or prep["rule_result"]
+        signal = _to_signal(prep, analysis, llm_generated=llm_analysis is not None)
         if signal is not None:
             signals.append(signal)
     return signals

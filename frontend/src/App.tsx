@@ -7,7 +7,7 @@ import {
 import { cn, formatCurrency, formatRelativeTime } from "@/lib/utils";
 import {
   api, BACKTESTABLE_STRATEGIES,
-  type ClosedPosition, type Config, type Order, type Portfolio, type Signal, type Stats, type ValidationResult,
+  type ClosedPosition, type CompareResult, type CompareSnapshot, type Config, type Order, type Portfolio, type Signal, type Stats, type ValidationResult,
 } from "@/lib/api";
 
 const Card = ({ children, className }: { children: React.ReactNode; className?: string }) => (
@@ -50,6 +50,7 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "portfolio", label: "Portfolio", icon: Wallet },
   { id: "signals", label: "Signals", icon: Activity },
+  { id: "compare", label: "AI Compare", icon: Sparkles },
   { id: "validation", label: "Validation", icon: FlaskConical },
   { id: "risk", label: "Risk Manager", icon: Shield },
   { id: "settings", label: "Settings", icon: SettingsIcon },
@@ -61,6 +62,7 @@ const TAB_TITLES: Record<TabId, string> = {
   dashboard: "Dashboard",
   portfolio: "Portfolio",
   signals: "Signals",
+  compare: "AI Pair Comparison",
   validation: "Strategy Validation",
   risk: "Risk Manager",
   settings: "Settings",
@@ -233,6 +235,9 @@ export default function App() {
             )}
             {activeTab === "signals" && (
               <SignalsTab isLoading={isLoading} signals={signals} />
+            )}
+            {activeTab === "compare" && (
+              <CompareTab config={config} />
             )}
             {activeTab === "validation" && (
               <ValidationTab config={config} />
@@ -565,6 +570,131 @@ function SegmentStats({ title, seg }: { title: string; seg: ValidationResult["in
         <div className="flex justify-between text-xs"><span className="text-foreground-muted">Total return</span><span className={cn("font-mono font-semibold", seg.total_return >= 0 ? "text-success" : "text-danger")}>{(seg.total_return * 100).toFixed(1)}%</span></div>
         <div className="flex justify-between text-xs"><span className="text-foreground-muted">Trades</span><span className="font-mono font-semibold">{seg.trades}</span></div>
       </div>
+    </div>
+  );
+}
+
+function CompareSnapshotCard({ snap, other }: { snap: CompareSnapshot; other: CompareSnapshot }) {
+  const rows: { label: string; value: React.ReactNode }[] = [
+    { label: "Price", value: formatCurrency(snap.price) },
+    { label: "RSI (14)", value: snap.rsi != null ? snap.rsi.toFixed(1) : "—" },
+    { label: "MACD trend", value: snap.macd_trend ?? "—" },
+    { label: "ADX", value: snap.adx != null ? snap.adx.toFixed(1) : "—" },
+    { label: "vs EMA50 / EMA200", value: `${snap.above_ema50 == null ? "—" : snap.above_ema50 ? "above" : "below"} / ${snap.above_ema200 == null ? "—" : snap.above_ema200 ? "above" : "below"}` },
+    { label: "6h trend", value: snap.higher_timeframe_trend ?? "—" },
+  ];
+  for (const [label, days] of [["7d return", "7d"], ["30d return", "30d"]] as const) {
+    const r = snap.returns[days];
+    const o = other.returns[days];
+    rows.push({
+      label,
+      value: r == null ? "—" : (
+        <span className={cn("font-semibold", r >= 0 ? "text-success" : "text-danger")}>
+          {(r * 100).toFixed(1)}%{o != null && r > o && <span className="ml-1.5 text-[10px] text-primary">leader</span>}
+        </span>
+      ),
+    });
+  }
+  const verdictVariant = snap.rule_verdict.signal === "BUY" ? "success" : snap.rule_verdict.signal === "SELL" ? "danger" : "default";
+  return (
+    <SectionCard title={snap.symbol} icon={TrendingUp} badge={<Badge variant={verdictVariant}>{snap.rule_verdict.signal} · {snap.rule_verdict.confidence}%</Badge>}>
+      <div className="divide-y divide-border">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center justify-between px-5 py-2.5 text-sm">
+            <span className="text-foreground-muted">{row.label}</span>
+            <span className="font-medium">{row.value}</span>
+          </div>
+        ))}
+        <p className="px-5 py-3 text-xs text-foreground-muted leading-relaxed">{snap.rule_verdict.reasoning}</p>
+      </div>
+    </SectionCard>
+  );
+}
+
+function CompareTab({ config }: { config: Config | null }) {
+  const pairs = config?.allowed_pairs ?? ["BTC-USD", "ETH-USD"];
+  const [symbolA, setSymbolA] = useState("BTC-USD");
+  const [symbolB, setSymbolB] = useState("ETH-USD");
+  const [result, setResult] = useState<CompareResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setErr(null);
+    try {
+      setResult(await api.compare(symbolA, symbolB));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Comparison failed.");
+      setResult(null);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <SectionCard title="Ask the AI: Pair Comparison" icon={Sparkles} badge={<Badge variant="primary">Read-only</Badge>}>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-foreground-muted leading-relaxed">
+            Side-by-side technical read of any two assets in the universe — the same indicators and
+            rule-based verdicts the trading pipeline uses, plus recent relative performance and (when
+            Claude is configured) a short comparative view. Analysis only: it never places an order
+            and is not financial advice.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            {([["A", symbolA, setSymbolA], ["B", symbolB, setSymbolB]] as const).map(([label, value, set]) => (
+              <label key={label} className="flex flex-col gap-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground-muted">Asset {label}</span>
+                <select
+                  value={value}
+                  onChange={(e) => set(e.target.value)}
+                  className="rounded-xl border border-border bg-surface-raised px-3 py-2 text-sm font-medium focus:border-primary focus:outline-none"
+                >
+                  {pairs.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </label>
+            ))}
+            <button
+              type="button"
+              onClick={run}
+              disabled={running || symbolA === symbolB}
+              className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary/90 transition-all disabled:opacity-50"
+            >
+              <Sparkles className={cn("h-4 w-4", running && "animate-pulse")} />
+              {running ? "Analyzing…" : "Compare"}
+            </button>
+          </div>
+          {symbolA === symbolB && <p className="text-xs text-warning">Pick two different assets.</p>}
+          {err && (
+            <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" /><span>{err}</span>
+            </div>
+          )}
+        </div>
+      </SectionCard>
+
+      {result && (
+        <>
+          {result.ai_view && (
+            <Card className="glass p-5 animate-slide-up border-primary/30 border-2">
+              <div className="flex items-start gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                  <Brain className="h-4 w-4 text-primary" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-foreground-muted mb-1">Claude's comparative read</p>
+                  <p className="text-sm leading-relaxed">{result.ai_view}</p>
+                </div>
+              </div>
+            </Card>
+          )}
+          <div className="grid gap-6 lg:grid-cols-2 animate-slide-up">
+            <CompareSnapshotCard snap={result.a} other={result.b} />
+            <CompareSnapshotCard snap={result.b} other={result.a} />
+          </div>
+        </>
+      )}
     </div>
   );
 }

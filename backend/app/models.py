@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, Text
 
 from app.database import Base
 
@@ -103,6 +103,31 @@ class Position(Base):
     # must not trip the DAILY limit forever.
     day_mark_price = Column(Float, nullable=True)
     day_mark_date = Column(String, nullable=True)  # "YYYY-MM-DD" (UTC)
+
+
+class AuditEvent(Base):
+    """One link in the tamper-evident audit chain.
+
+    Every consequential step of the pipeline — signal received, gate
+    rejection, AI decision, risk check, order fill/failure, position close —
+    is recorded here. Each event's hash covers its own content AND the
+    previous event's hash, so altering or deleting any historical row breaks
+    every hash after it. GET /api/audit/verify walks the chain and reports
+    the first break. Rows are append-only by design: nothing in the app
+    updates or deletes them (except the paper-mode full reset).
+    """
+    __tablename__ = "audit_events"
+
+    # Monotonic chain order. Autoincrement (not uuid) so the verify walk has
+    # a total order that can't be argued with.
+    seq = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=_now)
+    event_type = Column(String, index=True)   # signal_received, signal_rejected, ai_decision, risk_check, order_filled, order_failed, position_closed
+    signal_id = Column(String, nullable=True, index=True)
+    symbol = Column(String, nullable=True, index=True)
+    payload = Column(JSON, nullable=True)
+    prev_hash = Column(String(64))
+    hash = Column(String(64), index=True)
 
 
 class StrategyStatus(Base):
