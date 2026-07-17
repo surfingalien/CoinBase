@@ -412,10 +412,14 @@ def _to_signal(prep: Dict[str, Any], analysis: Dict[str, Any],
         "ta_take_profit": analysis.get("takeProfit"),
         # Cross-method verification context: the independent rule-based read
         # of the same indicators rides along so the decision engine can check
-        # an LLM-produced signal against it before any order is placed.
+        # an LLM-produced signal against it before any order is placed. The
+        # net confluence votes disambiguate a HOLD: net >= LLM_GATE_MIN_NET
+        # leans the same way as a BUY (the rules just aren't at their own
+        # net-3 action bar yet), while net <= 0 is a genuine disagreement.
         "llm_generated": llm_generated,
         "rule_signal": rule["signal"],
         "rule_confidence": (rule.get("confidence") or 0) / 100,
+        "rule_net_votes": prep["net_votes"],
     }
 
 
