@@ -175,9 +175,11 @@ class AIEngine:
         verification = None
         if strategy == "Native_TA_AI" and signal_data.get("llm_generated"):
             rule_signal = signal_data.get("rule_signal")
+            rule_net_votes = signal_data.get("rule_net_votes")
             verification = {
                 "method": "rule_confluence",
                 "rule_signal": rule_signal,
+                "rule_net_votes": rule_net_votes,
                 "outcome": "agree" if action == "BUY" else "exit_exempt",
             }
             if decision == "EXECUTE" and action == "BUY":
@@ -191,25 +193,42 @@ class AIEngine:
                         "indicators is SELL — contradiction vetoes the entry.]"
                     )
                 elif rule_signal != "BUY":
-                    # The rules see chop where the LLM sees a setup. Trade it
-                    # only if the damped confidence still clears the bar, at
-                    # reduced size.
-                    confidence *= 0.85
+                    # A rule-side HOLD is not one verdict but two. The LLM
+                    # gate deliberately sends borderline setups (|net votes|
+                    # >= 2) to Claude while the rules themselves only act at
+                    # net >= 3 — so a HOLD whose votes lean the SAME way as
+                    # the entry is the expected case, not a disagreement.
+                    # Damping its confidence below the execution threshold
+                    # rejected nearly every LLM entry the gate was designed
+                    # to produce. Same-direction HOLDs now keep their
+                    # confidence and pay only the 0.6x size haircut; HOLDs
+                    # leaning against the entry (or with no vote context)
+                    # remain a real disagreement and keep the old damping.
                     size_multiplier *= 0.6
-                    verification["outcome"] = "unconfirmed_damped"
-                    if confidence < settings.market_analysis_min_confidence:
-                        decision = "REJECT"
-                        verification["outcome"] = "unconfirmed_rejected"
+                    if rule_net_votes is not None and rule_net_votes > 0:
+                        verification["outcome"] = "weak_agreement_damped"
                         reasoning += (
-                            " [Verification: rule-based check reads HOLD; damped "
-                            f"confidence ({confidence:.0%}) no longer clears the "
-                            f"{settings.market_analysis_min_confidence:.0%} threshold.]"
+                            " [Verification: rule-based check reads HOLD but its "
+                            f"confluence leans the same way (net {rule_net_votes:+d}) — "
+                            "entry kept at 0.6x size.]"
                         )
                     else:
-                        reasoning += (
-                            " [Verification: rule-based check reads HOLD — entry kept "
-                            "at reduced confidence and 0.6x size.]"
-                        )
+                        confidence *= 0.85
+                        verification["outcome"] = "unconfirmed_damped"
+                        if confidence < settings.market_analysis_min_confidence:
+                            decision = "REJECT"
+                            verification["outcome"] = "unconfirmed_rejected"
+                            reasoning += (
+                                " [Verification: rule-based check reads HOLD against the "
+                                f"entry; damped confidence ({confidence:.0%}) no longer "
+                                f"clears the {settings.market_analysis_min_confidence:.0%} "
+                                "threshold.]"
+                            )
+                        else:
+                            reasoning += (
+                                " [Verification: rule-based check reads HOLD against the "
+                                "entry — kept at reduced confidence and 0.6x size.]"
+                            )
                 else:
                     reasoning += " [Verification: independent rule-based check agrees.]"
 
