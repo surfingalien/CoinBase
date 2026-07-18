@@ -24,14 +24,17 @@ _stop_event: asyncio.Event | None = None
 
 async def poll_once() -> None:
     async with async_session() as session:
-        await metabolism.flush_pending(session)
+        # Commit the flushed costs immediately: the buffer is drained by the
+        # flush, so if any later step in this cycle fails the rows must
+        # already be durable or that cycle's spend is lost forever.
+        if await metabolism.flush_pending(session):
+            await session.commit()
 
         try:
             exchange = get_exchange()
             liquid_cash = effective_usd_balance(await exchange.get_usd_balance())
         except Exception:
             logger.exception("Survival monitor: could not read balance; skipping tier update")
-            await session.commit()   # still persist the flushed costs
             return
 
         prev_tier = metabolism.current_tier()

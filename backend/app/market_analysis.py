@@ -339,7 +339,9 @@ async def run_ai_selftest(symbol: str = "BTC-USD") -> Dict[str, Any]:
 
         async def _call(with_tools: bool):
             kwargs: Dict[str, Any] = dict(
-                model=settings.anthropic_model,
+                # Same survival-tier model selection as the live analysis path,
+                # so the selftest probes what the bot is actually using.
+                model=metabolism.active_model(),
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": content}],
             )

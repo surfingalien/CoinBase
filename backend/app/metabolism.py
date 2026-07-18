@@ -64,8 +64,13 @@ _state: Dict[str, Any] = {"tier": "sustainable", "summary": None, "updated_at": 
 # ── Cost recording (hot path: cheap, no DB) ────────────────────────────────
 
 def _price_for(model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model name."""
-    if model and model == settings.llm_low_compute_model:
+    """(input, output) USD per 1M tokens for a model name. Prefix-tolerant:
+    the API may echo an alias ('claude-haiku-4-5') for a dated id
+    ('claude-haiku-4-5-20251001') or vice versa, and mispricing a cheap call
+    at the expensive tier would overstate burn and could downshift the
+    survival tier on phantom costs."""
+    low = settings.llm_low_compute_model
+    if model and low and (model.startswith(low) or low.startswith(model)):
         return settings.llm_low_compute_input_cost_per_mtok, settings.llm_low_compute_output_cost_per_mtok
     return settings.llm_input_cost_per_mtok, settings.llm_output_cost_per_mtok
 

@@ -217,10 +217,18 @@ def sanitize_signal_for_prompt(signal_data: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
-    return {
+    safe = {
         "symbol": sanitize_external_text(signal_data.get("symbol"), max_len=32, source="webhook"),
         "action": sanitize_external_text(signal_data.get("action"), max_len=16, source="webhook"),
         "strategy": sanitize_external_text(signal_data.get("strategy"), max_len=64, source="webhook"),
         "price": _num(signal_data.get("price")),
         "rsi": _num(signal_data.get("rsi")),
     }
+    # Strategy-specific numeric context the reword benefits from. Numbers are
+    # coerced through float(), so they can't carry an injection; anything
+    # non-numeric in these fields is dropped.
+    for key in ("volume_ratio", "atr", "uo", "uo_prev", "ema_200"):
+        value = _num(signal_data.get(key))
+        if value is not None:
+            safe[key] = value
+    return safe
