@@ -345,6 +345,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             stop_loss_price=signal_data.get("ta_stop_loss"),
             entry_fees_usd=entry_fees,
             strategy=strategy,
+            basis_source="trade",
         ))
 
         signal.status = "executed"

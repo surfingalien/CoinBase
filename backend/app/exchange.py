@@ -175,6 +175,8 @@ class Exchange(Protocol):
 
     async def get_account_value(self) -> float: ...
 
+    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]: ...
+
 
 # Only used when Coinbase's public ticker is unreachable (e.g. offline dev).
 _FALLBACK_PRICES = {
@@ -256,6 +258,11 @@ class MockExchange:
                 total += amount * await self.get_price(symbol)
         return total
 
+    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]:
+        """The paper simulator keeps no fill history — synced positions fall
+        back to the sync-moment price as their basis."""
+        return []
+
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
@@ -312,6 +319,48 @@ def combine_fills(fills: List[Dict[str, float]]) -> Tuple[float, float, float]:
     fees = sum(f["fees"] for f in fills)
     avg_price = sum(f["size"] * f["price"] for f in fills) / size if size > 0 else 0.0
     return size, avg_price, fees
+
+
+def cost_basis_from_fills(held_size: float, buy_fills_newest_first: List[Dict[str, float]],
+                          market_price: float) -> Tuple[float, str]:
+    """Reconstructs the cost basis of currently-held coins from BUY fill
+    history, so a synced position's P&L measures from what was actually paid
+    rather than from the sync moment.
+
+    Walks the newest BUY fills backwards until the held size is covered (the
+    coins you still hold are, to a first approximation, the ones you bought
+    most recently — older buys were consumed by intervening sells). Fees are
+    folded into the basis pro-rata, matching how Coinbase reports cost basis.
+    Held coins not covered by visible fills (transfers in, history beyond the
+    API window) are valued at the current market price — the only honest
+    baseline for coins with no visible purchase record.
+
+    Returns (entry_price, basis_source): 'fills' when fills cover ≥99% of the
+    held size, 'fills_partial' when partially covered, 'sync_price' when no
+    usable fills exist.
+    """
+    if held_size <= 0 or not buy_fills_newest_first:
+        return market_price, "sync_price"
+
+    remaining = held_size
+    covered = 0.0
+    cost = 0.0
+    for fill in buy_fills_newest_first:
+        if remaining <= 0:
+            break
+        size, price = fill.get("size", 0.0), fill.get("price", 0.0)
+        if size <= 0 or price <= 0:
+            continue
+        take = min(remaining, size)
+        cost += take * price + (take / size) * fill.get("fees", 0.0)
+        covered += take
+        remaining -= take
+
+    if covered <= 0:
+        return market_price, "sync_price"
+    cost += (held_size - covered) * market_price
+    source = "fills" if covered >= held_size * 0.99 else "fills_partial"
+    return cost / held_size, source
 
 
 class CoinbaseExchange:
@@ -388,6 +437,33 @@ class CoinbaseExchange:
                 except Exception:
                     continue  # no USD market for this asset; skip
         return total
+
+    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]:
+        """Newest-first BUY fills for a product, normalized to
+        [{'size': base_units, 'price': ..., 'fees': usd}] — the raw material
+        for reconstructing a synced position's true cost basis. Coinbase
+        returns fills most-recent-first; entries priced in quote units
+        (size_in_quote) are converted to base units."""
+        try:
+            response = self._client.get_fills(product_id=symbol, limit=250)
+        except Exception as exc:
+            raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
+
+        fills: List[Dict[str, float]] = []
+        for fill in response.get("fills", []):
+            if str(fill.get("side", "")).upper() != "BUY":
+                continue
+            try:
+                price = float(fill.get("price") or 0)
+                size = float(fill.get("size") or 0)
+                fees = float(fill.get("commission") or 0)
+            except (TypeError, ValueError):
+                continue
+            if str(fill.get("size_in_quote", "")).lower() == "true" or fill.get("size_in_quote") is True:
+                size = size / price if price > 0 else 0.0
+            if size > 0 and price > 0:
+                fills.append({"size": size, "price": price, "fees": fees})
+        return fills
 
     async def _fetch_actual_fill(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Polls the placed order until Coinbase reports its fill, and returns
