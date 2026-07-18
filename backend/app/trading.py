@@ -11,7 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import audit, regime, strategy_evaluator, strategy_gate
+from app import audit, metabolism, regime, strategy_evaluator, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -123,6 +123,16 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             if len(open_positions) >= settings.max_open_positions:
                 await reject(f"Max open positions ({settings.max_open_positions}) reached.")
                 await session.commit()
+                return
+
+            # Survival breaker: when the automaton's runway is critical it stops
+            # opening new positions to preserve the cash that keeps it alive.
+            # Exits are never halted (the SELL branch never reaches here), and a
+            # human can always intervene — it never shuts itself down.
+            if metabolism.entries_halted():
+                await reject(metabolism.halt_reason())
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked: survival tier critical")
                 return
 
             # Evaluator verdict: a strategy demoted for negative live

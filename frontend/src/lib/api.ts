@@ -173,6 +173,29 @@ export const BACKTESTABLE_STRATEGIES = [
   "Turtle_Trend",
 ] as const;
 
+export interface Metabolism {
+  enabled: boolean;
+  tier: "sustainable" | "stable" | "low_compute" | "critical";
+  window_days: number;
+  liquid_cash_usd: number;
+  costs: {
+    llm_usd: number;
+    infra_usd: number;
+    operating_total_usd: number;
+  };
+  revenue: { trading_net_pnl_usd: number };
+  rates_per_day: {
+    operating_cost_usd: number;
+    trading_net_pnl_usd: number;
+    net_cashflow_usd: number;
+  };
+  runway_days: number | null;   // null = self-sustaining (infinite)
+  self_sustaining: boolean;
+  shedding_compute: boolean;
+  entries_halted: boolean;
+  active_model: string;
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
@@ -203,6 +226,7 @@ export const api = {
   compare: (a: string, b: string) =>
     getJSON<CompareResult>(`/api/analyze/compare?symbol_a=${encodeURIComponent(a)}&symbol_b=${encodeURIComponent(b)}`),
   auditVerify: () => getJSON<AuditVerify>("/api/audit/verify"),
+  metabolism: () => getJSON<Metabolism>("/api/metabolism"),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
   syncHoldings: () => postJSON<{
     synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
