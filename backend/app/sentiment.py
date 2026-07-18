@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from loguru import logger
 
+from app import injection_defense
 from app.config import settings
 
 FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
@@ -130,8 +131,14 @@ def prompt_section(sentiment: Optional[Dict[str, Any]]) -> str:
     if headlines:
         lines.append("- Recent crypto headlines:")
         for h in headlines:
+            # Headlines are third-party text (unauthenticated RSS): defang any
+            # injection tokens before they enter the prompt. R10 — data, not
+            # instruction. The whole sentiment block is additionally fenced as
+            # untrusted where it's assembled into the analysis prompt.
             if isinstance(h, dict):
-                lines.append(f"  * {h['title']} [{h.get('source', '?')}]")
+                title = injection_defense.sanitize_external_text(h.get("title"), source="rss")
+                src = injection_defense.sanitize_external_text(h.get("source", "?"), max_len=32, source="rss")
+                lines.append(f"  * {title} [{src}]")
             else:  # pre-evidence cache entries were plain strings
-                lines.append(f"  * {h}")
+                lines.append(f"  * {injection_defense.sanitize_external_text(h, source='rss')}")
     return "\n".join(lines) + "\n" if len(lines) > 1 else ""

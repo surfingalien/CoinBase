@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from loguru import logger
 
-from app import sentiment as sentiment_mod
+from app import injection_defense, sentiment as sentiment_mod
 from app.config import KNOWN_STRATEGIES, RISK_TIERS, settings
 
 # Strategies whose SELL signals are re-checked server-side above. Any other
@@ -291,9 +291,19 @@ class AIEngine:
             from app.market_analysis import _get_anthropic_client
 
             client = _get_anthropic_client()
+            # signal_data can carry arbitrary webhook-supplied fields; dumping
+            # the whole dict here is the injection vector. Pass only a
+            # whitelisted, sanitized view, and fence it as untrusted data so a
+            # crafted field can't rewrite the instruction. R10 — data, not
+            # instruction; this call only rewords, it never changes the
+            # decision the rule engine already made.
+            safe_signal = injection_defense.sanitize_signal_for_prompt(signal_data)
             prompt = (
-                "You are a risk-averse crypto trading assistant. A rule-based system already "
-                f"made the decision '{decision}' for this signal: {signal_data}. "
+                "You are a risk-averse crypto trading assistant. "
+                f"{injection_defense.UNTRUSTED_INPUT_RULE} "
+                f"A rule-based system already made the decision '{decision}' for this signal, "
+                f"described in the untrusted block below:\n"
+                f"{injection_defense.wrap_untrusted(safe_signal, 'signal fields', source='webhook')}\n"
                 f"Its reasoning was: '{rule_based_reasoning}'. "
                 "Rewrite that reasoning in 1-2 concise, professional sentences for a trading "
                 "dashboard. Do not change the decision or suggest a different action."
