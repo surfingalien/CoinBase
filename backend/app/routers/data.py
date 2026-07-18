@@ -4,7 +4,9 @@ from sqlalchemy import delete, select
 from app import audit as audit_mod, metabolism, sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
-from app.exchange import CoinbaseExchange, MockExchange, get_exchange
+from loguru import logger
+
+from app.exchange import CoinbaseExchange, MockExchange, cost_basis_from_fills, get_exchange
 from app.models import AuditEvent, CostEvent, Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
@@ -63,6 +65,10 @@ async def get_portfolio():
                 "stop_loss_price": effective_sl,
                 "unrealized_pnl": unrealized_pnl,
                 "managed": is_managed,
+                # How entry_price was derived, so the UI can say whether P&L
+                # measures from actual purchase ("trade"/"fills") or only from
+                # the sync moment ("sync_price"/"fills_partial").
+                "basis_source": p.basis_source or "trade",
             })
 
         # Prefer the real account NAV; fall back to cash + tracked positions
@@ -308,6 +314,19 @@ async def sync_holdings(manage_exits: bool = False):
                 skipped.append({"symbol": symbol, "reason": "dust (< $1)"})
                 continue
 
+            # Reconstruct the true cost basis from BUY fill history so the
+            # position's P&L measures from what was actually paid — matching
+            # Coinbase's own "All" P&L — rather than resetting to zero at the
+            # sync moment. Falls back to the sync-moment price (labelled as
+            # such) when no fills are visible: transfers in, or history the
+            # API can't see.
+            entry_price, basis_source = price, "sync_price"
+            try:
+                buy_fills = await exchange.get_recent_buy_fills(symbol)
+                entry_price, basis_source = cost_basis_from_fills(amount, buy_fills, price)
+            except Exception:
+                logger.warning(f"Sync: fill history unavailable for {symbol}; using sync-price basis")
+
             stop_loss = take_profit = None
             if manage_exits:
                 candles = await market_data.fetch_candles(symbol, 86400)
@@ -318,17 +337,20 @@ async def sync_holdings(manage_exits: bool = False):
                 symbol=symbol,
                 side="long",
                 size=amount,
-                entry_price=price,
+                entry_price=entry_price,
                 current_price=price,
-                peak_price=price,
-                unrealized_pnl=0.0,
+                peak_price=max(price, entry_price),
+                unrealized_pnl=(price - entry_price) * amount,
                 exit_reason=None,
                 managed=manage_exits,
                 stop_loss_price=stop_loss,
                 take_profit_price=take_profit,
+                basis_source=basis_source,
             ))
             synced.append({
-                "symbol": symbol, "size": amount, "entry_price": price,
+                "symbol": symbol, "size": amount, "entry_price": round(entry_price, 8),
+                "basis_source": basis_source,
+                "unrealized_pnl": round((price - entry_price) * amount, 2),
                 "value_usd": round(value_usd, 2), "managed": manage_exits,
                 "stop_loss_price": stop_loss, "take_profit_price": take_profit,
             })
@@ -342,7 +364,10 @@ async def sync_holdings(manage_exits: bool = False):
             "exposure math, never sold by the bot. Re-run with ?manage_exits=true to "
             "have the monitor manage them with ATR-scaled exits (2*ATR stop, 3*ATR "
             "target; falls back to the global percentages only if candle history is "
-            "unavailable). Entry price is today's market price, not original cost."
+            "unavailable). Entry price is reconstructed from your Coinbase BUY fill "
+            "history where visible (basis_source=fills), so P&L measures from what "
+            "you actually paid; coins with no visible fills use the sync-moment "
+            "price (basis_source=sync_price)."
         ),
     }
 

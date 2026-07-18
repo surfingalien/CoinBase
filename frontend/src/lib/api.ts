@@ -32,6 +32,11 @@ export interface Position {
   take_profit_price: number | null;
   stop_loss_price: number | null;
   unrealized_pnl: number;
+  managed?: boolean;
+  // "trade" = bot's own fill; "fills" = basis reconstructed from Coinbase buy
+  // history; "fills_partial" = partly reconstructed; "sync_price" = P&L
+  // measures from the sync moment, not original purchase.
+  basis_source?: "trade" | "fills" | "fills_partial" | "sync_price";
 }
 
 export interface Portfolio {

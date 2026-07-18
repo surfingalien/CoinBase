@@ -104,6 +104,16 @@ class Position(Base):
     day_mark_price = Column(Float, nullable=True)
     day_mark_date = Column(String, nullable=True)  # "YYYY-MM-DD" (UTC)
 
+    # Where entry_price came from, so P&L is always interpretable:
+    #   "trade"         — the bot's own fill (exact basis)
+    #   "fills"         — synced holding, basis reconstructed from Coinbase
+    #                     BUY fill history (matches Coinbase's own P&L view)
+    #   "fills_partial" — fills covered only part of the held size; the rest
+    #                     was valued at the sync-moment price
+    #   "sync_price"    — no visible fills; basis IS the sync-moment price,
+    #                     so P&L measures from sync, not from purchase
+    basis_source = Column(String, nullable=True)
+
 
 class AuditEvent(Base):
     """One link in the tamper-evident audit chain.

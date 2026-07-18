@@ -283,7 +283,9 @@ function DashboardTab({ isLoading, portfolio, stats, signals, orders }: {
                 <div className={cn("flex items-center gap-1.5", (stats?.total_pnl || 0) >= 0 ? "text-success" : "text-danger")}>
                   {(stats?.total_pnl || 0) >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
                   <span className="text-sm font-semibold">{formatCurrency(stats?.total_pnl)}</span>
-                  <span className="text-xs text-foreground-muted">total P&L</span>
+                  <span className="text-xs text-foreground-muted">
+                    P&L since tracked ({formatCurrency(stats?.realized_pnl)} realized / {formatCurrency(stats?.unrealized_pnl)} open)
+                  </span>
                 </div>
                 <div className="h-4 w-px bg-border" />
                 <Badge variant={(stats?.win_rate || 0) >= 50 ? "success" : "warning"}>{stats?.win_rate ?? 0}% win rate</Badge>
