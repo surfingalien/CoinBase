@@ -14,7 +14,7 @@ import uuid
 
 from loguru import logger
 
-from app import market_analysis
+from app import market_analysis, metabolism
 from app.config import ALLOWED_PAIRS, settings
 from app.trading import process_signal
 
@@ -63,8 +63,11 @@ async def _run_loop(stop_event: asyncio.Event) -> None:
         except Exception:
             logger.exception("Market analysis poll cycle failed")
 
+        # Heartbeat slows when the survival loop is shedding compute — fewer
+        # analysis cycles means fewer LLM calls and a lower burn rate.
+        interval = metabolism.poll_interval_seconds(settings.market_analysis_poll_interval_seconds)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=settings.market_analysis_poll_interval_seconds)
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
         except asyncio.TimeoutError:
             pass
 

@@ -43,15 +43,41 @@ every trade, exits are sized to the exact position, and the hash-chained audit
 trail records each decision. `injection_defense.scan` additionally logs when a
 high-risk pattern is seen, so attempts are visible rather than silent.
 
-## Not yet ported
+## Metabolism / survival economics (built)
 
-Two Automaton defenses were evaluated and deferred because they guard
-subsystems this repo does not have:
+The economic "metabolism" layer is now in `backend/app/metabolism.py`: it meters
+what the automaton costs to run (LLM token spend + amortized infra; trading fees
+are already netted out of realized P&L), computes **runway** (days of cash left
+at the current net burn), and sets a **survival tier**. The
+`survival_monitor` loop recomputes it on an interval and records every tier
+change to the audit chain; `GET /api/metabolism` exposes the live picture.
+
+The tiers are the two-sided response Conway's `low-compute.ts` describes,
+adapted to our stack:
+
+| Tier | Trigger | Effect |
+|---|---|---|
+| `sustainable` | earns ≥ it burns | full behaviour |
+| `stable` | burning, long runway | full behaviour |
+| `low_compute` | runway ≤ `survival_runway_low_days` | **shed cost**: cheaper model, slower heartbeat |
+| `critical` | runway ≤ `survival_runway_critical_days`, or out of cash | shed cost **and halt new entries**; alert |
+
+This is the literal embodiment of "if it cannot pay, it stops" — but *stops*
+means stops **acting** (opening positions, spending on inference), never
+self-deletion. Exits always run, and a human can always intervene.
+
+## Not yet ported
 
 - **Loop detector** — guards an agentic planner that chooses tool calls in a
   loop. Our pipeline is deterministic (`signal → gates → reword → risk →
   order`); the LLM never selects actions. Worth porting only if/when an
   agentic action loop is added.
-- **Cost-shedding survival tiers** — need the economic "metabolism" layer
-  (cost tracking → runway → tiers) that does not exist here yet. The
-  burn-reduction response drops in naturally once that layer is built.
+
+## Deliberately not built
+
+Autonomous **self-replication** (provisioning infra and spawning copies) and
+autonomous **self-modification-and-redeploy** with the human removed from the
+loop. The human merge-gate is the only point where a bad edit or a runaway loss
+is caught before it propagates. Self-improvement here stays **gated**: the bot
+proposes changes as pull requests and waits for a human to merge — which is how
+the trade-execution fix and this layer both shipped.

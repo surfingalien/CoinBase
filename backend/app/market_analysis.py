@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from app import injection_defense, market_data, sentiment as sentiment_mod, technical_indicators as ta
+from app import injection_defense, market_data, metabolism, sentiment as sentiment_mod, technical_indicators as ta
 from app.config import settings
 
 # 6-hour candles for trend confirmation above the (default 1h) trading timeframe.
@@ -270,7 +270,9 @@ async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
 
     async def _call(with_tools: bool):
         kwargs: Dict[str, Any] = dict(
-            model=settings.anthropic_model,
+            # Survival-tier aware: the cheaper model when the metabolism loop
+            # has told us to shed compute, the default model otherwise.
+            model=metabolism.active_model(),
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": content}],
         )
@@ -290,6 +292,7 @@ async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
         logger.warning("Batched Claude call failed with web_search; retrying without it")
         response = await _call(with_tools=False)
 
+    metabolism.record_llm_usage_from_response(response)
     raw_text = "".join(block.text for block in response.content if block.type == "text")
     return _parse_batch_response(raw_text)
 
@@ -365,6 +368,7 @@ async def run_ai_selftest(symbol: str = "BTC-USD") -> Dict[str, Any]:
                 result["error"] = f"Claude API call failed: {exc}"
                 return result
 
+        metabolism.record_llm_usage_from_response(response)
         block_types = [getattr(b, "type", "?") for b in response.content]
         result["response_block_types"] = block_types
         result["web_search_actually_used"] = any(

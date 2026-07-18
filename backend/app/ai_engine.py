@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from loguru import logger
 
-from app import injection_defense, sentiment as sentiment_mod
+from app import injection_defense, metabolism, sentiment as sentiment_mod
 from app.config import KNOWN_STRATEGIES, RISK_TIERS, settings
 
 # Strategies whose SELL signals are re-checked server-side above. Any other
@@ -309,10 +309,11 @@ class AIEngine:
                 "dashboard. Do not change the decision or suggest a different action."
             )
             response = await client.messages.create(
-                model=settings.anthropic_model,
+                model=metabolism.active_model(),
                 max_tokens=160,
                 messages=[{"role": "user", "content": prompt}],
             )
+            metabolism.record_llm_usage_from_response(response)
             text = "".join(block.text for block in response.content if block.type == "text").strip()
             return text or rule_based_reasoning
         except Exception:

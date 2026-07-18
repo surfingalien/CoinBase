@@ -1,11 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, select
 
-from app import audit as audit_mod, sentiment as sentiment_mod
+from app import audit as audit_mod, metabolism, sentiment as sentiment_mod
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from app.exchange import CoinbaseExchange, MockExchange, get_exchange
-from app.models import AuditEvent, Order, Position, Signal
+from app.models import AuditEvent, CostEvent, Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
 router = APIRouter(prefix="/api", tags=["data"])
@@ -226,10 +226,12 @@ async def reset_paper_trading():
         # slate — keeping it would leave a chain full of dangling signal ids.
         # Live mode never reaches this handler, so real history stays intact.
         await session.execute(delete(AuditEvent))
+        await session.execute(delete(CostEvent))
         await session.commit()
 
     if isinstance(exchange, MockExchange):
         exchange.reset()
+    metabolism.reset_state()
 
     return {"status": "reset", "usd_balance": await exchange.get_usd_balance()}
 
@@ -449,6 +451,22 @@ async def verify_audit_trail():
     break, first_break pinpoints the earliest bad link."""
     async with async_session() as session:
         return await audit_mod.verify_chain(session)
+
+
+@router.get("/metabolism")
+async def get_metabolism():
+    """The automaton's economic vitals: what it costs to run (LLM + infra),
+    what it earns (trading P&L net of fees), its net daily burn, its runway in
+    days, and the current survival tier. This is the live embodiment of "if it
+    cannot pay, it stops" — a runway that runs short makes the bot shed compute
+    and, at the extreme, halt new entries."""
+    try:
+        exchange = get_exchange()
+        liquid = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+    async with async_session() as session:
+        return await metabolism.summarize(session, liquid)
 
 
 @router.get("/analyze/compare")

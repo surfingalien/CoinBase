@@ -164,6 +164,37 @@ class Settings(BaseSettings):
     # actually produces while still rejecting genuinely fee-dominated trades.
     max_fee_fraction_of_target: float = 0.30
 
+    # ── Metabolism / survival economics ──────────────────────────────────
+    # The automaton's economic self-awareness: it tracks what it costs to keep
+    # itself alive — hosting + LLM token spend (trading fees are already netted
+    # out of realized P&L) — and computes its runway: how many days of cash it
+    # has left at the current net burn. As runway runs short it SHEDS cost
+    # (switches to a cheaper model, slows its heartbeat) and, at the extreme,
+    # halts new entries and raises an alert. It never deletes itself or its
+    # infrastructure — "stops existing" means stops ACTING, with a human always
+    # able to intervene.
+    metabolism_enabled: bool = True
+    metabolism_window_days: int = 7          # trailing window for cost/revenue rates
+    # PLACEHOLDER — set to your real monthly hosting bill (Railway/VPS/etc.).
+    infra_monthly_cost_usd: float = 5.0
+    # Anthropic token pricing, USD per 1M tokens. PLACEHOLDERS at approximate
+    # list prices for the configured models — override to match your plan.
+    # Used only for cost accounting, never for trading math.
+    llm_input_cost_per_mtok: float = 15.0
+    llm_output_cost_per_mtok: float = 75.0
+    llm_low_compute_input_cost_per_mtok: float = 1.0
+    llm_low_compute_output_cost_per_mtok: float = 5.0
+    # Cheaper model the survival loop switches to when shedding compute.
+    llm_low_compute_model: str = "claude-haiku-4-5-20251001"
+    # Runway thresholds (days). At/under low_days → shed compute; at/under
+    # critical_days → also halt new entries. Exits are never halted.
+    survival_runway_low_days: float = 30.0
+    survival_runway_critical_days: float = 7.0
+    survival_monitor_interval_seconds: int = 300
+    # When shedding compute, the analysis poll interval is multiplied by this
+    # (slower heartbeat = fewer LLM calls = lower burn).
+    survival_low_compute_poll_multiplier: float = 3.0
+
 
 settings = Settings()
 

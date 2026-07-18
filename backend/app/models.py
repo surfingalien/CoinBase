@@ -130,6 +130,23 @@ class AuditEvent(Base):
     hash = Column(String(64), index=True)
 
 
+class CostEvent(Base):
+    """One metered operating cost of keeping the automaton alive.
+
+    Trading fees are already netted out of Position.realized_pnl, so the costs
+    tracked HERE are the ones that otherwise go unaccounted: LLM token spend
+    (one row per Claude call) and, if ever metered directly, infrastructure.
+    The metabolism layer sums these over a trailing window to compute burn and
+    runway. Append-only; wiped only by the paper-mode reset."""
+    __tablename__ = "cost_events"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    timestamp = Column(DateTime, default=_now, index=True)
+    category = Column(String, index=True)   # "llm" | "infra"
+    amount_usd = Column(Float, default=0.0)
+    detail = Column(JSON, nullable=True)     # e.g. {"model":..., "input_tokens":..., "output_tokens":...}
+
+
 class StrategyStatus(Base):
     """The evaluator's verdict on each strategy: 'active' strategies trade
     normally; 'demoted' ones are blocked from opening new positions until the
