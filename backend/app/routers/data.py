@@ -466,7 +466,14 @@ async def get_metabolism():
     except Exception as exc:
         raise _exchange_error(exc) from exc
     async with async_session() as session:
-        return await metabolism.summarize(session, liquid)
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        open_value = sum(
+            (p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+            for p in open_positions
+        )
+        return await metabolism.summarize(session, liquid, open_position_value=open_value)
 
 
 @router.get("/analyze/compare")

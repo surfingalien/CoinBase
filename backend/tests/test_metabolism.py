@@ -47,7 +47,7 @@ def db():
 # ── Pure logic ──────────────────────────────────────────────────────────────
 
 def test_tier_ladder():
-    assert metabolism._tier_for(None, -5.0, 0.0) == "critical"       # out of cash
+    assert metabolism._tier_for(None, -5.0, 0.0) == "critical"       # zero equity
     assert metabolism._tier_for(None, 2.0, 100.0) == "sustainable"   # earns > burns
     assert metabolism._tier_for(3.0, -1.0, 50.0) == "critical"       # runway < critical
     assert metabolism._tier_for(20.0, -1.0, 50.0) == "low_compute"   # runway < low
@@ -68,13 +68,24 @@ def test_cached_state_accessors(monkeypatch):
     metabolism.set_state({"tier": "low_compute"})
     assert metabolism.active_model() == settings.llm_low_compute_model
     assert metabolism.entries_halted() is False
+    assert metabolism.entry_size_multiplier() == 1.0
     assert metabolism.poll_interval_seconds(900) == int(900 * settings.survival_low_compute_poll_multiplier)
 
-    metabolism.set_state({"tier": "critical", "runway_days": 2})
+    # Critical tier DAMPS entries — it never halts them on runway alone.
+    # Halting would remove the only revenue source and self-lock the account.
+    metabolism.set_state({"tier": "critical", "runway_days": 2, "entries_halted": False})
+    assert metabolism.entries_halted() is False
+    assert metabolism.entry_size_multiplier() == metabolism.ENTRY_SIZE_DAMP_CRITICAL
+
+    # The hard halt exists ONLY for the physically-impossible case: liquid
+    # cash below the minimum order size.
+    metabolism.set_state({"tier": "critical", "entries_halted": True, "liquid_cash_usd": 4.0})
     assert metabolism.entries_halted() is True
+    assert "minimum order" in metabolism.halt_reason()
 
     metabolism.set_state({"tier": "sustainable"})
     assert metabolism.active_model() == settings.anthropic_model
+    assert metabolism.entry_size_multiplier() == 1.0
     assert metabolism.poll_interval_seconds(900) == 900
 
 
@@ -130,20 +141,58 @@ def test_summarize_self_sustaining_is_infinite_runway(db, monkeypatch):
     assert summ["costs"]["llm_usd"] == pytest.approx(7.0)
 
 
-def test_summarize_critical_halts_entries(db, monkeypatch):
+def test_small_live_account_damps_but_never_self_locks(db, monkeypatch):
+    """The Opus 4.8 review case: a ~$72 live account burning ~$10/day of LLM
+    costs hits the critical tier — it must SHED compute and DAMP entries, but
+    keep trading, because entries are its only way to earn runway back."""
+    monkeypatch.setattr(settings, "metabolism_window_days", 7, raising=False)
+    monkeypatch.setattr(settings, "infra_monthly_cost_usd", 30.0, raising=False)   # $1/day infra
+    async def run():
+        await _seed(db, llm_costs=(63.0,))   # $63 LLM over 7d = $9/day; total $10/day
+        async with db() as session:
+            return await metabolism.summarize(session, liquid_cash=65.0)
+
+    summ = asyncio.get_event_loop().run_until_complete(run())
+    assert summ["runway_days"] == pytest.approx(6.5, abs=0.3)
+    assert summ["tier"] == "critical"
+    assert summ["shedding_compute"] is True                 # cheaper model, slower heartbeat
+    assert summ["entries_halted"] is False                  # NOT halted — no self-lock
+    assert summ["entry_size_multiplier"] == metabolism.ENTRY_SIZE_DAMP_CRITICAL
+
+
+def test_truly_broke_account_halts_entries(db, monkeypatch):
     monkeypatch.setattr(settings, "metabolism_window_days", 7, raising=False)
     monkeypatch.setattr(settings, "infra_monthly_cost_usd", 300.0, raising=False)  # $10/day
 
     async def run():
         await _seed(db)
         async with db() as session:
-            return await metabolism.summarize(session, liquid_cash=20.0)  # 2-day runway
+            # Below the $10 minimum order size — an entry is impossible.
+            return await metabolism.summarize(session, liquid_cash=4.0)
 
     summ = asyncio.get_event_loop().run_until_complete(run())
-    assert summ["runway_days"] == pytest.approx(2.0, abs=0.5)
     assert summ["tier"] == "critical"
     assert summ["entries_halted"] is True
-    assert summ["shedding_compute"] is True
+
+
+def test_deployed_capital_counts_toward_runway(db, monkeypatch):
+    """Moving cash into positions must not read as approaching death: runway
+    is judged on equity (cash + sellable position value), so a mostly-deployed
+    account with modest burn stays 'stable', not 'critical'."""
+    monkeypatch.setattr(settings, "metabolism_window_days", 7, raising=False)
+    monkeypatch.setattr(settings, "infra_monthly_cost_usd", 30.0, raising=False)   # $1/day
+
+    async def run():
+        await _seed(db)
+        async with db() as session:
+            return await metabolism.summarize(session, liquid_cash=20.0,
+                                              open_position_value=680.0)
+
+    summ = asyncio.get_event_loop().run_until_complete(run())
+    assert summ["equity_usd"] == pytest.approx(700.0)
+    assert summ["runway_days"] == pytest.approx(700.0, abs=1.0)
+    assert summ["tier"] == "stable"
+    assert summ["entries_halted"] is False
 
 
 def test_flush_pending_persists_and_clears_buffer(db):

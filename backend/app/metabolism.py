@@ -126,9 +126,19 @@ async def flush_pending(session) -> int:
 
 # ── Summarization ──────────────────────────────────────────────────────────
 
-def _tier_for(runway_days: Optional[float], net_daily_cashflow: float, liquid_cash: float) -> str:
-    """Pure tier decision from the computed economics."""
-    if liquid_cash <= 0:
+# Entry-size multiplier applied at the critical tier. Trading is the only
+# revenue source and its costs are bounded (fees + risk-gated sizes), so a
+# cash-starved organism trades SMALLER, it doesn't stop trading — stopping
+# would lock it into pure burn with no way to earn back. A hard halt applies
+# only when liquid cash can't fund even a minimum order.
+ENTRY_SIZE_DAMP_CRITICAL = 0.5
+
+
+def _tier_for(runway_days: Optional[float], net_daily_cashflow: float, equity: float) -> str:
+    """Pure tier decision from the computed economics. Judged on EQUITY
+    (cash + open position value): deployed capital is sellable, so moving
+    cash into positions must not read as approaching death."""
+    if equity <= 0:
         return "critical"
     if net_daily_cashflow >= 0:
         return "sustainable"          # earns at least what it burns
@@ -141,7 +151,8 @@ def _tier_for(runway_days: Optional[float], net_daily_cashflow: float, liquid_ca
     return "stable"
 
 
-async def summarize(session, liquid_cash: float) -> Dict[str, Any]:
+async def summarize(session, liquid_cash: float,
+                    open_position_value: float = 0.0) -> Dict[str, Any]:
     """Compute the full economic picture over the trailing window. Pure read;
     counts both persisted CostEvents and the un-flushed buffer."""
     window_days = max(1, settings.metabolism_window_days)
@@ -170,18 +181,28 @@ async def summarize(session, liquid_cash: float) -> Dict[str, Any]:
     operating_cost_per_day = llm_per_day + infra_per_day
     net_daily_cashflow = trading_pnl_per_day - operating_cost_per_day
 
+    # Runway is judged on EQUITY: open positions are sellable assets, so a
+    # dollar deployed into a position is still a dollar of survival capital.
+    equity = liquid_cash + max(0.0, open_position_value)
     if net_daily_cashflow >= 0:
         runway_days: Optional[float] = None    # self-sustaining → infinite
     else:
-        runway_days = liquid_cash / (-net_daily_cashflow) if liquid_cash > 0 else 0.0
+        runway_days = equity / (-net_daily_cashflow) if equity > 0 else 0.0
 
-    tier = _tier_for(runway_days, net_daily_cashflow, liquid_cash)
+    tier = _tier_for(runway_days, net_daily_cashflow, equity)
+    # Hard halt ONLY when liquid cash can't fund a minimum order — anything
+    # softer is size damping, because halting entries removes the only
+    # revenue source and turns a short runway into a one-way trap.
+    from app.risk import MIN_TRADE_SIZE_USD
+    halted = liquid_cash < MIN_TRADE_SIZE_USD
 
     return {
         "enabled": settings.metabolism_enabled,
         "tier": tier,
         "window_days": window_days,
         "liquid_cash_usd": round(liquid_cash, 2),
+        "open_position_value_usd": round(max(0.0, open_position_value), 2),
+        "equity_usd": round(equity, 2),
         "costs": {
             "llm_usd": round(llm_cost, 4),
             "infra_usd": round(infra_cost, 4),
@@ -196,7 +217,8 @@ async def summarize(session, liquid_cash: float) -> Dict[str, Any]:
         "runway_days": None if runway_days is None else round(runway_days, 1),
         "self_sustaining": net_daily_cashflow >= 0,
         "shedding_compute": tier in _SHED_TIERS,
-        "entries_halted": tier == "critical",
+        "entries_halted": halted,
+        "entry_size_multiplier": ENTRY_SIZE_DAMP_CRITICAL if tier == "critical" else 1.0,
         "active_model": settings.llm_low_compute_model if tier in _SHED_TIERS else settings.anthropic_model,
     }
 
@@ -222,18 +244,33 @@ def active_model() -> str:
 
 
 def entries_halted() -> bool:
-    """True when the automaton is too cash-starved to open new positions.
-    Exits are never affected."""
-    return settings.metabolism_enabled and _state["tier"] == "critical"
+    """True ONLY when liquid cash can't fund a minimum order — the one case
+    where an entry is physically impossible. A short runway damps entry size
+    instead (see entry_size_multiplier); a halt on runway alone would remove
+    the only revenue source and self-lock. Exits are never affected."""
+    if not settings.metabolism_enabled:
+        return False
+    summary = _state.get("summary") or {}
+    return bool(summary.get("entries_halted"))
+
+
+def entry_size_multiplier() -> float:
+    """Survival damping for new entries: half size at the critical tier, full
+    size otherwise. Trading smaller preserves capital while keeping the only
+    revenue path open."""
+    if settings.metabolism_enabled and _state["tier"] == "critical":
+        return ENTRY_SIZE_DAMP_CRITICAL
+    return 1.0
 
 
 def halt_reason() -> str:
     summary = _state.get("summary") or {}
-    runway = summary.get("runway_days")
-    runway_txt = "out of cash" if not runway else f"~{runway}d runway"
+    cash = summary.get("liquid_cash_usd")
+    cash_txt = f"${cash}" if cash is not None else "below the minimum order size"
     return (
-        f"[Survival: critical tier ({runway_txt}) — new entries halted to "
-        f"preserve runway. Exits still run; a human can intervene.]"
+        f"[Survival: liquid cash ({cash_txt}) can't fund a minimum order — "
+        f"new entries paused until cash frees up. Exits still run; a human "
+        f"can intervene.]"
     )
 
 

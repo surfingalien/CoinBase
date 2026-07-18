@@ -178,6 +178,8 @@ export interface Metabolism {
   tier: "sustainable" | "stable" | "low_compute" | "critical";
   window_days: number;
   liquid_cash_usd: number;
+  open_position_value_usd: number;
+  equity_usd: number;
   costs: {
     llm_usd: number;
     infra_usd: number;
@@ -192,7 +194,8 @@ export interface Metabolism {
   runway_days: number | null;   // null = self-sustaining (infinite)
   self_sustaining: boolean;
   shedding_compute: boolean;
-  entries_halted: boolean;
+  entries_halted: boolean;   // only when liquid cash can't fund a minimum order
+  entry_size_multiplier: number;   // 0.5 at critical tier, 1.0 otherwise
   active_model: string;
 }
 
