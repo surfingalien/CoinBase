@@ -126,14 +126,16 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
                 await session.commit()
                 return
 
-            # Survival breaker: when the automaton's runway is critical it stops
-            # opening new positions to preserve the cash that keeps it alive.
-            # Exits are never halted (the SELL branch never reaches here), and a
-            # human can always intervene — it never shuts itself down.
+            # Survival breaker: a hard halt applies ONLY when liquid cash
+            # can't fund a minimum order (an entry is physically impossible).
+            # A short runway never halts — it damps entry size further down
+            # this function, because trading is the only revenue source and
+            # halting it would lock a burning account into certain death.
+            # Exits are never affected, and a human can always intervene.
             if metabolism.entries_halted():
                 await reject(metabolism.halt_reason())
                 await session.commit()
-                logger.info(f"Signal {signal_id} blocked: survival tier critical")
+                logger.info(f"Signal {signal_id} blocked: liquid cash below minimum order size")
                 return
 
             # Evaluator verdict: a strategy demoted for negative live
@@ -233,11 +235,17 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             .limit(PERFORMANCE_LOOKBACK_TRADES)
         )).scalars().all()
         perf_mult = performance_multiplier(recent_closed)
-        size_multiplier = ai_result["size_multiplier"] * perf_mult
+        survival_mult = metabolism.entry_size_multiplier()
+        size_multiplier = ai_result["size_multiplier"] * perf_mult * survival_mult
         if perf_mult != 1.0:
             signal.ai_reasoning += (
                 f" Strategy's recent record scaled the entry {perf_mult:.2f}x "
                 f"({len(recent_closed)} closed trades considered)."
+            )
+        if survival_mult != 1.0:
+            signal.ai_reasoning += (
+                f" [Survival: runway is critical — entry damped to "
+                f"{survival_mult:.0%} size so the bot keeps earning while it preserves capital.]"
             )
 
         # Take-profit distance for the fee-expectancy check: the signal's own

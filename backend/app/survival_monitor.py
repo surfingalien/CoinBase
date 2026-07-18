@@ -11,11 +11,13 @@ trade, never touches infrastructure, and never deletes anything.
 import asyncio
 
 from loguru import logger
+from sqlalchemy import select
 
 from app import audit, metabolism
 from app.config import settings
 from app.database import async_session
 from app.exchange import get_exchange
+from app.models import Position
 from app.risk import effective_usd_balance
 
 _task: asyncio.Task | None = None
@@ -37,8 +39,18 @@ async def poll_once() -> None:
             logger.exception("Survival monitor: could not read balance; skipping tier update")
             return
 
+        # Deployed capital counts toward runway: positions are sellable, so
+        # equity — not just idle cash — is what keeps the organism alive.
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        open_value = sum(
+            (p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+            for p in open_positions
+        )
+
         prev_tier = metabolism.current_tier()
-        summary = await metabolism.summarize(session, liquid_cash)
+        summary = await metabolism.summarize(session, liquid_cash, open_position_value=open_value)
         metabolism.set_state(summary)
 
         if summary["tier"] != prev_tier:
@@ -57,6 +69,7 @@ async def poll_once() -> None:
                 "liquid_cash_usd": summary["liquid_cash_usd"],
                 "shedding_compute": summary["shedding_compute"],
                 "entries_halted": summary["entries_halted"],
+                "entry_size_multiplier": summary["entry_size_multiplier"],
             })
 
         await session.commit()

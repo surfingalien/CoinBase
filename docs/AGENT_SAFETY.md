@@ -55,15 +55,27 @@ change to the audit chain; `GET /api/metabolism` exposes the live picture.
 The tiers are the two-sided response Conway's `low-compute.ts` describes,
 adapted to our stack:
 
+Runway is judged on **equity** (liquid cash + open position value): deployed
+capital is sellable, so moving cash into positions never reads as approaching
+death.
+
 | Tier | Trigger | Effect |
 |---|---|---|
 | `sustainable` | earns ≥ it burns | full behaviour |
 | `stable` | burning, long runway | full behaviour |
 | `low_compute` | runway ≤ `survival_runway_low_days` | **shed cost**: cheaper model, slower heartbeat |
-| `critical` | runway ≤ `survival_runway_critical_days`, or out of cash | shed cost **and halt new entries**; alert |
+| `critical` | runway ≤ `survival_runway_critical_days`, or zero equity | shed cost **and damp entries to 50% size**; alert |
 
-This is the literal embodiment of "if it cannot pay, it stops" — but *stops*
-means stops **acting** (opening positions, spending on inference), never
+A hard entry **halt** applies only when liquid cash can't fund a minimum
+order — an entry is then physically impossible. A short runway alone never
+halts trading: entries are the organism's only revenue source, so halting
+them would lock a burning account into certain death (a self-lock found by an
+Opus 4.8 review of the original design, which halted at critical). The
+survival response targets the actual cash drain — LLM burn — via shedding,
+and trades smaller rather than not at all.
+
+This is the honest embodiment of "if it cannot pay, it stops" — *stops* means
+stops **spending** (cheaper inference, slower heartbeat, smaller bets), never
 self-deletion. Exits always run, and a human can always intervene.
 
 ## Not yet ported
