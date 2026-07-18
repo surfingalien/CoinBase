@@ -19,6 +19,7 @@ from app.exchange import get_exchange
 from app.models import Order, Position, Signal
 from app.risk import (
     PERFORMANCE_LOOKBACK_TRADES,
+    apply_fee_floor,
     assumed_round_trip_fee_pct,
     compute_daily_pnl_pct,
     effective_usd_balance,
@@ -247,6 +248,22 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         if ta_tp and signal_price > 0:
             take_profit_pct = max(0.0, float(ta_tp) / signal_price - 1.0) or settings.take_profit_pct
 
+        # Fee-aware target floor: an ATR-scale target tighter than the fee
+        # gate's minimum viable distance is extended to that floor (when the
+        # symbol's volatility can plausibly reach it), so a strong setup
+        # trades with a cost-covering target instead of being rejected. The
+        # stored take-profit is updated to match so the position monitor
+        # exits at the floored target, not the original tight one.
+        take_profit_pct, fee_floored = apply_fee_floor(
+            take_profit_pct, signal_price, signal_data.get("atr")
+        )
+        if fee_floored:
+            signal_data["ta_take_profit"] = round(signal_price * (1 + take_profit_pct), 8)
+            signal.ai_reasoning += (
+                f" [Fee-aware target: the ATR target was inside the fee floor — "
+                f"take-profit extended to {take_profit_pct:.2%} so the trade clears its costs.]"
+            )
+
         open_position_value = sum(
             (p.current_price or p.entry_price) * p.size for p in open_positions
         )
@@ -266,6 +283,8 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             "usd_balance": usd_balance,
             "daily_pnl_pct": daily_pnl_pct,
             "performance_multiplier": perf_mult,
+            "take_profit_pct": take_profit_pct,
+            "fee_floor_applied": fee_floored,
         })
         if sizing.rejected:
             await reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")

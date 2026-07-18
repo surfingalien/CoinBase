@@ -423,6 +423,10 @@ def _to_signal(prep: Dict[str, Any], analysis: Dict[str, Any],
         "strategy": "Native_TA_AI",
         "price": prep["price"],
         "rsi": prep["indicators"].get("rsi"),
+        # ATR rides along so the fee-aware target floor can judge whether an
+        # extended (cost-covering) take-profit is reachable at this
+        # volatility before committing to it.
+        "atr": prep["indicators"].get("atr"),
         "ta_confidence": (analysis.get("confidence") or 0) / 100,
         "ta_reasoning": analysis.get("reasoning"),
         "ta_stop_loss": analysis.get("stopLoss"),

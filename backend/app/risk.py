@@ -30,6 +30,47 @@ def assumed_round_trip_fee_pct() -> float:
     entry_fee = settings.maker_fee_pct if settings.maker_entries_enabled else settings.paper_fee_pct
     return entry_fee + settings.paper_fee_pct
 
+
+# Safety margin on the fee floor so a floored target clears the gate's >=
+# comparison strictly rather than landing exactly on it.
+TAKE_PROFIT_FLOOR_MARGIN = 0.05
+# A floored target further than this many ATRs above entry is judged
+# unreachable for the symbol's current volatility — the setup genuinely can't
+# outrun its own costs, so the fee gate's rejection stands.
+ATR_REACHABILITY_MULTIPLE = 6.0
+
+
+def min_viable_take_profit_pct() -> float:
+    """The smallest take-profit distance that clears the fee-expectancy gate,
+    with a small margin. 0 when the gate is disabled."""
+    if settings.max_fee_fraction_of_target <= 0:
+        return 0.0
+    return assumed_round_trip_fee_pct() / settings.max_fee_fraction_of_target * (1 + TAKE_PROFIT_FLOOR_MARGIN)
+
+
+def apply_fee_floor(take_profit_pct: float, price: float, atr: Optional[float]) -> tuple:
+    """Reconciles ATR-scale targets with the fee-expectancy gate.
+
+    The analyzer's take-profits are sized to volatility (2.5-3x ATR on 1h
+    candles ≈ 1.5-2%), while the fee gate demands the target be far enough
+    that fees stay under MAX_FEE_FRACTION_OF_TARGET of it (≈3.2% at current
+    fees) — so strong setups were generated and then rejected wholesale. When
+    a target is tighter than the fee floor, extend it TO the floor: the trade
+    then carries a realistic cost-covering target instead of being discarded.
+
+    Reachability guard: if the floor sits more than ATR_REACHABILITY_MULTIPLE
+    ATRs above entry, the extended target is a fantasy for this volatility —
+    return the original target untouched and let the fee gate reject it.
+
+    Returns (take_profit_pct, floored).
+    """
+    floor = min_viable_take_profit_pct()
+    if floor <= 0 or take_profit_pct <= 0 or take_profit_pct >= floor:
+        return take_profit_pct, False
+    if price > 0 and atr and floor * price > ATR_REACHABILITY_MULTIPLE * float(atr):
+        return take_profit_pct, False
+    return floor, True
+
 # How many of a strategy's most recent closed trades feed its performance
 # score, and how many it must have before the score affects sizing at all.
 PERFORMANCE_LOOKBACK_TRADES = 20
