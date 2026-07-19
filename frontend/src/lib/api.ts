@@ -237,7 +237,8 @@ export const api = {
   metabolism: () => getJSON<Metabolism>("/api/metabolism"),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
   syncHoldings: () => postJSON<{
-    synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
+    synced: { symbol: string; size: number; entry_price: number; value_usd: number; basis_source?: string; unrealized_pnl?: number }[];
+    rebased: { symbol: string; old_entry_price: number; new_entry_price: number; basis_source: string; unrealized_pnl: number }[];
     skipped: { symbol: string; reason: string }[];
     note: string;
   }>("/api/sync-holdings"),
