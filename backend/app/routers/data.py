@@ -264,7 +264,7 @@ async def _live_crypto_holdings(exchange) -> dict:
 
 
 @router.post("/sync-holdings")
-async def sync_holdings(manage_exits: bool = False):
+async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
     """Registers crypto you already hold on Coinbase as tracked positions.
 
     Default (manage_exits=false): HOLD-ONLY — the position shows in the
@@ -277,8 +277,15 @@ async def sync_holdings(manage_exits: bool = False):
     With ?manage_exits=true the bot does manage exits, but with levels
     scaled to each symbol's own volatility (2*ATR stop, 3*ATR target) rather
     than the fixed percentages, so the stop sits outside normal daily noise
-    and the reward exceeds the risk. Entry price is the current market price
-    (Coinbase's balance endpoint doesn't expose original cost basis)."""
+    and the reward exceeds the risk.
+
+    With ?rebase_basis=true, ALREADY-TRACKED synced positions get their cost
+    basis recomputed from Coinbase BUY fill history in place — for positions
+    created before fills-based basis existed (or when deeper fill history has
+    become available). Positions whose basis is the bot's own fill
+    (basis_source="trade") are never touched: that basis is exact. Exit
+    levels are left unchanged — basis is bookkeeping, exits are risk
+    management."""
     from app import market_data
     from app.risk import atr_exit_levels
     from app.technical_indicators import compute_atr
@@ -289,12 +296,12 @@ async def sync_holdings(manage_exits: bool = False):
     except Exception as exc:
         raise _exchange_error(exc) from exc
 
-    synced, skipped = [], []
+    synced, skipped, rebased = [], [], []
     async with async_session() as session:
         open_positions = (await session.execute(
             select(Position).where(Position.status == "open")
         )).scalars().all()
-        tracked = {p.symbol for p in open_positions}
+        tracked = {p.symbol: p for p in open_positions}
 
         for currency, amount in raw.items():
             symbol = f"{currency}-USD"
@@ -302,7 +309,32 @@ async def sync_holdings(manage_exits: bool = False):
                 skipped.append({"symbol": symbol, "reason": "not in the allowed trading universe"})
                 continue
             if symbol in tracked:
-                skipped.append({"symbol": symbol, "reason": "already tracked as an open position"})
+                position = tracked[symbol]
+                if not rebase_basis:
+                    skipped.append({"symbol": symbol, "reason": "already tracked as an open position"})
+                    continue
+                if position.basis_source == "trade":
+                    skipped.append({"symbol": symbol, "reason": "bot-opened position — its fill basis is exact, never rebased"})
+                    continue
+                try:
+                    price = await exchange.get_price(symbol)
+                    buy_fills = await exchange.get_recent_buy_fills(symbol)
+                except Exception as exc:
+                    skipped.append({"symbol": symbol, "reason": f"rebase failed: {exc}"})
+                    continue
+                new_entry, basis_source = cost_basis_from_fills(position.size, buy_fills, price)
+                old_entry = position.entry_price
+                position.entry_price = new_entry
+                position.basis_source = basis_source
+                position.current_price = price
+                position.unrealized_pnl = (price - new_entry) * position.size
+                rebased.append({
+                    "symbol": symbol,
+                    "old_entry_price": round(old_entry, 8),
+                    "new_entry_price": round(new_entry, 8),
+                    "basis_source": basis_source,
+                    "unrealized_pnl": round((price - new_entry) * position.size, 2),
+                })
                 continue
             try:
                 price = await exchange.get_price(symbol)
@@ -358,6 +390,7 @@ async def sync_holdings(manage_exits: bool = False):
 
     return {
         "synced": synced,
+        "rebased": rebased,
         "skipped": skipped,
         "note": (
             "Synced positions are HOLD-ONLY by default: tracked in the portfolio and "
@@ -367,7 +400,9 @@ async def sync_holdings(manage_exits: bool = False):
             "unavailable). Entry price is reconstructed from your Coinbase BUY fill "
             "history where visible (basis_source=fills), so P&L measures from what "
             "you actually paid; coins with no visible fills use the sync-moment "
-            "price (basis_source=sync_price)."
+            "price (basis_source=sync_price). Re-run with ?rebase_basis=true to "
+            "recompute the basis of already-tracked synced positions in place "
+            "(bot-opened positions are never rebased — their fill basis is exact)."
         ),
     }
 

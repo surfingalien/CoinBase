@@ -438,31 +438,44 @@ class CoinbaseExchange:
                     continue  # no USD market for this asset; skip
         return total
 
-    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]:
+    async def get_recent_buy_fills(self, symbol: str, max_fills: int = 1000) -> List[Dict[str, float]]:
         """Newest-first BUY fills for a product, normalized to
         [{'size': base_units, 'price': ..., 'fees': usd}] — the raw material
         for reconstructing a synced position's true cost basis. Coinbase
         returns fills most-recent-first; entries priced in quote units
-        (size_in_quote) are converted to base units."""
-        try:
-            response = self._client.get_fills(product_id=symbol, limit=250)
-        except Exception as exc:
-            raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
-
+        (size_in_quote) are converted to base units. Paginates via the fills
+        cursor up to max_fills, since holdings accumulated through many small
+        buys (DCA, dust-sized fills) need deeper history than one page for
+        full basis coverage."""
         fills: List[Dict[str, float]] = []
-        for fill in response.get("fills", []):
-            if str(fill.get("side", "")).upper() != "BUY":
-                continue
+        cursor: Optional[str] = None
+        while len(fills) < max_fills:
             try:
-                price = float(fill.get("price") or 0)
-                size = float(fill.get("size") or 0)
-                fees = float(fill.get("commission") or 0)
-            except (TypeError, ValueError):
-                continue
-            if str(fill.get("size_in_quote", "")).lower() == "true" or fill.get("size_in_quote") is True:
-                size = size / price if price > 0 else 0.0
-            if size > 0 and price > 0:
-                fills.append({"size": size, "price": price, "fees": fees})
+                kwargs: Dict[str, Any] = {"product_id": symbol, "limit": 250}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                response = self._client.get_fills(**kwargs)
+            except Exception as exc:
+                raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
+
+            page = response.get("fills", []) or []
+            for fill in page:
+                if str(fill.get("side", "")).upper() != "BUY":
+                    continue
+                try:
+                    price = float(fill.get("price") or 0)
+                    size = float(fill.get("size") or 0)
+                    fees = float(fill.get("commission") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if str(fill.get("size_in_quote", "")).lower() == "true" or fill.get("size_in_quote") is True:
+                    size = size / price if price > 0 else 0.0
+                if size > 0 and price > 0:
+                    fills.append({"size": size, "price": price, "fees": fees})
+
+            cursor = response.get("cursor") or None
+            if not cursor or not page:
+                break
         return fills
 
     async def _fetch_actual_fill(self, order_id: str) -> Optional[Dict[str, Any]]:
