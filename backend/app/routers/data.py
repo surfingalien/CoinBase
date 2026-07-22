@@ -465,6 +465,44 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
     }
 
 
+@router.get("/holdings/manage")
+async def manage_holdings():
+    """Convenience GET so this can be triggered by simply opening a URL in a
+    phone browser — no button, no POST body, no query params. Hands every
+    hold-only synced position to the bot's exit management (ATR-scaled stop /
+    take-profit anchored to the current price) AND refreshes cost basis from
+    fill history — exactly POST /api/sync-holdings?manage_exits=true&rebase_
+    basis=true. Idempotent: already-managed and bot-opened positions are left
+    alone. After this, the "—" Take Profit / Stop Loss columns become real
+    numbers and the monitor books those positions."""
+    result = await sync_holdings(manage_exits=True, rebase_basis=True)
+    upgraded = result.get("upgraded", [])
+
+    # Definitive diagnostic: after the run, list every open position that is
+    # STILL hold-only. If the sync loop couldn't reach a position — e.g. its
+    # coin no longer reports an available balance on Coinbase, so it never
+    # appears in the holdings fetch the upgrade iterates — it shows up here
+    # instead of being silently missed. An empty list means everything is
+    # managed.
+    async with async_session() as session:
+        still = (await session.execute(
+            select(Position).where(Position.status == "open", Position.managed.is_(False))
+        )).scalars().all()
+    still_hold_only = [p.symbol for p in still]
+    result["still_hold_only"] = still_hold_only
+
+    if upgraded:
+        summary = f"Now managing {len(upgraded)} holding(s): " + ", ".join(u["symbol"] for u in upgraded) + "."
+    elif still_hold_only:
+        summary = ("Nothing was upgraded, and these are STILL hold-only: "
+                   + ", ".join(still_hold_only)
+                   + ". They weren't reached by the holdings fetch — send this response to debug.")
+    else:
+        summary = "All positions are already managed — nothing to upgrade."
+    result["summary"] = summary + " Reload the Portfolio to see the levels."
+    return result
+
+
 def _drift_rows(db_sizes: dict, exchange_sizes: dict, prices: dict) -> list:
     """Per-symbol comparison of what the DB thinks is held (open positions)
     vs. what the exchange account actually holds. Pure function so the drift
