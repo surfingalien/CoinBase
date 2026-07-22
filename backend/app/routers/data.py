@@ -1,3 +1,6 @@
+import asyncio
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, select
 
@@ -6,7 +9,13 @@ from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
 from loguru import logger
 
-from app.exchange import CoinbaseExchange, MockExchange, cost_basis_from_fills, get_exchange
+from app.exchange import (
+    CoinbaseExchange,
+    MockExchange,
+    cost_basis_from_fills,
+    get_exchange,
+    plan_position_dedupe,
+)
 from app.models import AuditEvent, CostEvent, Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
@@ -263,8 +272,54 @@ async def _live_crypto_holdings(exchange) -> dict:
     return {}
 
 
+# Serializes all holdings-mutating operations (sync / manage / dedupe). Sync
+# reads the tracked-positions set, then does seconds of network I/O per coin
+# before creating rows — a wide window in which a second concurrent call reads
+# the same "not tracked yet" set and creates DUPLICATE positions for the same
+# symbol. This lock closes that window (single-worker deployment).
+_holdings_lock = asyncio.Lock()
+
+
+async def _dedupe_positions(exchange) -> dict:
+    """Bookkeeping reconcile of open positions to the real account — NEVER
+    trades. Collapses duplicate rows to one per symbol (sized to the true
+    balance) and closes positions for coins no longer held. Caller holds
+    _holdings_lock."""
+    held = await _live_crypto_holdings(exchange)
+    exchange_sizes = {f"{currency}-USD": amount for currency, amount in held.items()}
+    report: dict = {"deleted": [], "resized": [], "closed_not_held": []}
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        plan = plan_position_dedupe(open_positions, exchange_sizes)
+        for p in plan["delete"]:
+            report["deleted"].append({"symbol": p.symbol, "size": round(p.size or 0.0, 8)})
+            await session.delete(p)
+        for p, new_size in plan["resize"]:
+            report["resized"].append({"symbol": p.symbol, "from": round(p.size or 0.0, 8), "to": round(new_size, 8)})
+            p.size = new_size
+            p.unrealized_pnl = ((p.current_price or p.entry_price) - p.entry_price) * new_size
+        for p in plan["orphan"]:
+            report["closed_not_held"].append({"symbol": p.symbol})
+            p.status = "closed"
+            p.exit_reason = "not_held"
+            p.closed_at = datetime.now(timezone.utc)
+            p.realized_pnl = 0.0
+        await session.commit()
+    return report
+
+
 @router.post("/sync-holdings")
 async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
+    """Serialized entry point — the real work is in _sync_holdings_impl. The
+    lock prevents two concurrent syncs from each reading 'not tracked yet' and
+    both creating a row for the same coin (the 20-positions-for-8-coins bug)."""
+    async with _holdings_lock:
+        return await _sync_holdings_impl(manage_exits, rebase_basis)
+
+
+async def _sync_holdings_impl(manage_exits: bool = False, rebase_basis: bool = False):
     """Registers crypto you already hold on Coinbase as tracked positions.
 
     Default (manage_exits=false): HOLD-ONLY — the position shows in the
@@ -475,7 +530,18 @@ async def manage_holdings():
     basis=true. Idempotent: already-managed and bot-opened positions are left
     alone. After this, the "—" Take Profit / Stop Loss columns become real
     numbers and the monitor books those positions."""
-    result = await sync_holdings(manage_exits=True, rebase_basis=True)
+    try:
+        exchange = get_exchange()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    # One lock spans dedupe + manage so no concurrent sync can slip a duplicate
+    # in between them. Dedupe first (collapse the duplicate rows to match the
+    # real account), then upgrade/rebase the survivors.
+    async with _holdings_lock:
+        deduped = await _dedupe_positions(exchange)
+        result = await _sync_holdings_impl(manage_exits=True, rebase_basis=True)
+    result["deduped"] = deduped
     upgraded = result.get("upgraded", [])
 
     # Definitive diagnostic: after the run, list every open position that is
@@ -491,15 +557,21 @@ async def manage_holdings():
     still_hold_only = [p.symbol for p in still]
     result["still_hold_only"] = still_hold_only
 
+    parts = []
+    n_removed = len(deduped["deleted"])
+    if n_removed:
+        parts.append(f"Removed {n_removed} duplicate position row(s)")
+    if deduped["resized"]:
+        parts.append(f"corrected size on {len(deduped['resized'])}")
+    if deduped["closed_not_held"]:
+        parts.append(f"closed {len(deduped['closed_not_held'])} no-longer-held")
     if upgraded:
-        summary = f"Now managing {len(upgraded)} holding(s): " + ", ".join(u["symbol"] for u in upgraded) + "."
-    elif still_hold_only:
-        summary = ("Nothing was upgraded, and these are STILL hold-only: "
-                   + ", ".join(still_hold_only)
-                   + ". They weren't reached by the holdings fetch — send this response to debug.")
-    else:
-        summary = "All positions are already managed — nothing to upgrade."
-    result["summary"] = summary + " Reload the Portfolio to see the levels."
+        parts.append("now managing " + ", ".join(u["symbol"] for u in upgraded))
+    if still_hold_only:
+        parts.append("STILL hold-only: " + ", ".join(still_hold_only) + " (send this response to debug)")
+    if not parts:
+        parts.append("Everything already reconciled and managed")
+    result["summary"] = ". ".join(parts) + ". Reload the Portfolio to see the levels."
     return result
 
 

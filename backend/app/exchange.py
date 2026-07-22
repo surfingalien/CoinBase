@@ -321,6 +321,41 @@ def combine_fills(fills: List[Dict[str, float]]) -> Tuple[float, float, float]:
     return size, avg_price, fees
 
 
+def plan_position_dedupe(positions: List[Any], exchange_sizes: Dict[str, float]) -> Dict[str, list]:
+    """Plan a bookkeeping reconcile of open positions to the real account — NO
+    trading. Sync's read-then-network-I/O-then-create window let concurrent
+    calls create duplicate rows for the same symbol; this collapses them.
+
+    ``positions``: duck-typed objects with .symbol/.size/.managed/.basis_source/
+    .opened_at. ``exchange_sizes``: {symbol: amount} actually held on-exchange.
+
+    For each symbol keep ONE canonical row — preferring a managed one, then a
+    real (fills/trade) basis, then the earliest — delete the duplicate rows,
+    resize the survivor to the true balance, and flag survivors whose coin is
+    no longer held at all. Pure/deterministic so the merge math is testable.
+    Returns {"keep","delete","resize","orphan"}; resize is (position, size)."""
+    by_symbol: Dict[str, list] = {}
+    for p in positions:
+        by_symbol.setdefault(p.symbol, []).append(p)
+
+    keep, delete, resize, orphan = [], [], [], []
+    for symbol, group in by_symbol.items():
+        ranked = sorted(group, key=lambda p: (
+            0 if getattr(p, "managed", None) is True else 1,
+            0 if (getattr(p, "basis_source", None) or "") in ("fills", "fills_partial", "trade") else 1,
+            str(getattr(p, "opened_at", "") or ""),
+        ))
+        canonical = ranked[0]
+        keep.append(canonical)
+        delete.extend(ranked[1:])
+        actual = exchange_sizes.get(symbol, 0.0)
+        if actual <= 0:
+            orphan.append(canonical)
+        elif abs((canonical.size or 0.0) - actual) > max(1e-9, actual * 0.001):
+            resize.append((canonical, actual))
+    return {"keep": keep, "delete": delete, "resize": resize, "orphan": orphan}
+
+
 def cost_basis_from_fills(held_size: float, buy_fills_newest_first: List[Dict[str, float]],
                           market_price: float) -> Tuple[float, str]:
     """Reconstructs the cost basis of currently-held coins from BUY fill
