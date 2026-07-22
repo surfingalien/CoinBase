@@ -465,6 +465,26 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
     }
 
 
+@router.get("/holdings/manage")
+async def manage_holdings():
+    """Convenience GET so this can be triggered by simply opening a URL in a
+    phone browser — no button, no POST body, no query params. Hands every
+    hold-only synced position to the bot's exit management (ATR-scaled stop /
+    take-profit anchored to the current price) AND refreshes cost basis from
+    fill history — exactly POST /api/sync-holdings?manage_exits=true&rebase_
+    basis=true. Idempotent: already-managed and bot-opened positions are left
+    alone. After this, the "—" Take Profit / Stop Loss columns become real
+    numbers and the monitor books those positions."""
+    result = await sync_holdings(manage_exits=True, rebase_basis=True)
+    upgraded = result.get("upgraded", [])
+    result["summary"] = (
+        f"Now managing {len(upgraded)} holding(s): "
+        + (", ".join(u["symbol"] for u in upgraded) if upgraded else "none needed upgrading")
+        + ". Reload the Portfolio to see the take-profit / stop-loss levels."
+    )
+    return result
+
+
 def _drift_rows(db_sizes: dict, exchange_sizes: dict, prices: dict) -> list:
     """Per-symbol comparison of what the DB thinks is held (open positions)
     vs. what the exchange account actually holds. Pure function so the drift
