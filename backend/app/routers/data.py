@@ -296,7 +296,23 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
     except Exception as exc:
         raise _exchange_error(exc) from exc
 
-    synced, skipped, rebased = [], [], []
+    async def _managed_exit_levels(symbol: str, anchor_price: float):
+        """ATR-scaled (stop, take_profit) anchored to anchor_price, with a
+        FIXED-PERCENT fallback that is also anchored to anchor_price when ATR
+        is unavailable. Anchoring the fallback to the current price (not the
+        cost-basis entry) is what keeps an already-profitable synced bag from
+        being instantly booked the moment it's put under management — the
+        target sits ahead of where the price is now, and the trailing stop
+        protects the gain."""
+        candles = await market_data.fetch_candles(symbol, 86400)
+        atr = compute_atr(candles["highs"], candles["lows"], candles["closes"]) if candles else None
+        stop_loss, take_profit = atr_exit_levels(anchor_price, atr)
+        if take_profit is None:
+            take_profit = anchor_price * (1 + settings.take_profit_pct)
+            stop_loss = anchor_price * (1 - settings.stop_loss_pct)
+        return stop_loss, take_profit
+
+    synced, skipped, rebased, upgraded = [], [], [], []
     async with async_session() as session:
         open_positions = (await session.execute(
             select(Position).where(Position.status == "open")
@@ -310,31 +326,68 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
                 continue
             if symbol in tracked:
                 position = tracked[symbol]
-                if not rebase_basis:
-                    skipped.append({"symbol": symbol, "reason": "already tracked as an open position"})
-                    continue
-                if position.basis_source == "trade":
-                    skipped.append({"symbol": symbol, "reason": "bot-opened position — its fill basis is exact, never rebased"})
-                    continue
-                try:
-                    price = await exchange.get_price(symbol)
-                    buy_fills = await exchange.get_recent_buy_fills(symbol)
-                except Exception as exc:
-                    skipped.append({"symbol": symbol, "reason": f"rebase failed: {exc}"})
-                    continue
-                new_entry, basis_source = cost_basis_from_fills(position.size, buy_fills, price)
-                old_entry = position.entry_price
-                position.entry_price = new_entry
-                position.basis_source = basis_source
-                position.current_price = price
-                position.unrealized_pnl = (price - new_entry) * position.size
-                rebased.append({
-                    "symbol": symbol,
-                    "old_entry_price": round(old_entry, 8),
-                    "new_entry_price": round(new_entry, 8),
-                    "basis_source": basis_source,
-                    "unrealized_pnl": round((price - new_entry) * position.size, 2),
-                })
+                actions = []
+
+                # Both operations need the current price; fetch once.
+                want_rebase = rebase_basis and position.basis_source != "trade"
+                want_manage = manage_exits and position.managed is False
+                if want_rebase or want_manage:
+                    try:
+                        price = await exchange.get_price(symbol)
+                    except Exception as exc:
+                        skipped.append({"symbol": symbol, "reason": f"update failed: {exc}"})
+                        continue
+
+                if want_rebase:
+                    try:
+                        buy_fills = await exchange.get_recent_buy_fills(symbol)
+                    except Exception as exc:
+                        skipped.append({"symbol": symbol, "reason": f"rebase failed: {exc}"})
+                        continue
+                    new_entry, basis_source = cost_basis_from_fills(position.size, buy_fills, price)
+                    old_entry = position.entry_price
+                    position.entry_price = new_entry
+                    position.basis_source = basis_source
+                    position.current_price = price
+                    position.unrealized_pnl = (price - new_entry) * position.size
+                    rebased.append({
+                        "symbol": symbol,
+                        "old_entry_price": round(old_entry, 8),
+                        "new_entry_price": round(new_entry, 8),
+                        "basis_source": basis_source,
+                        "unrealized_pnl": round((price - new_entry) * position.size, 2),
+                    })
+                    actions.append("rebased")
+
+                if want_manage:
+                    # Convert a hold-only synced position to managed in place:
+                    # the monitor will now book it (ATR target on further
+                    # upside, or the trailing stop once it pulls back from a
+                    # peak). Levels anchor to the current price, so existing
+                    # gains are protected rather than market-dumped on the spot.
+                    stop_loss, take_profit = await _managed_exit_levels(symbol, price)
+                    position.managed = True
+                    position.stop_loss_price = stop_loss
+                    position.take_profit_price = take_profit
+                    position.current_price = price
+                    position.peak_price = max(position.peak_price or position.entry_price, price)
+                    upgraded.append({
+                        "symbol": symbol,
+                        "stop_loss_price": round(stop_loss, 8) if stop_loss else None,
+                        "take_profit_price": round(take_profit, 8) if take_profit else None,
+                        "note": "now managed — booked by the monitor at the ATR target or a trailing stop",
+                    })
+                    actions.append("managed")
+
+                if not actions:
+                    if position.basis_source == "trade" and rebase_basis:
+                        reason = "bot-opened position — its fill basis is exact, never rebased"
+                    elif position.managed is not False and manage_exits:
+                        reason = "already tracked and managed"
+                    else:
+                        reason = ("already tracked — pass ?manage_exits=true to manage its exits "
+                                  "or ?rebase_basis=true to refresh its cost basis")
+                    skipped.append({"symbol": symbol, "reason": reason})
                 continue
             try:
                 price = await exchange.get_price(symbol)
@@ -361,9 +414,10 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
 
             stop_loss = take_profit = None
             if manage_exits:
-                candles = await market_data.fetch_candles(symbol, 86400)
-                atr = compute_atr(candles["highs"], candles["lows"], candles["closes"]) if candles else None
-                stop_loss, take_profit = atr_exit_levels(price, atr)
+                # Anchored to the current price (with a current-price fallback
+                # when ATR is unavailable), so a synced position already above
+                # its cost basis isn't instantly booked on the first cycle.
+                stop_loss, take_profit = await _managed_exit_levels(symbol, price)
 
             session.add(Position(
                 symbol=symbol,
@@ -391,13 +445,17 @@ async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
     return {
         "synced": synced,
         "rebased": rebased,
+        "upgraded": upgraded,
         "skipped": skipped,
         "note": (
             "Synced positions are HOLD-ONLY by default: tracked in the portfolio and "
             "exposure math, never sold by the bot. Re-run with ?manage_exits=true to "
-            "have the monitor manage them with ATR-scaled exits (2*ATR stop, 3*ATR "
-            "target; falls back to the global percentages only if candle history is "
-            "unavailable). Entry price is reconstructed from your Coinbase BUY fill "
+            "have the monitor manage exits with ATR-scaled levels (2*ATR stop, 3*ATR "
+            "target, anchored to the current price; falls back to the global "
+            "percentages off the current price if candle history is unavailable) — "
+            "this now UPGRADES already-tracked hold-only positions in place, not just "
+            "newly added ones, so the monitor books them at the target or via the "
+            "trailing stop. Entry price is reconstructed from your Coinbase BUY fill "
             "history where visible (basis_source=fills), so P&L measures from what "
             "you actually paid; coins with no visible fills use the sync-moment "
             "price (basis_source=sync_price). Re-run with ?rebase_basis=true to "
