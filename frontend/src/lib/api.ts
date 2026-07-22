@@ -239,6 +239,7 @@ export const api = {
   syncHoldings: () => postJSON<{
     synced: { symbol: string; size: number; entry_price: number; value_usd: number; basis_source?: string; unrealized_pnl?: number }[];
     rebased: { symbol: string; old_entry_price: number; new_entry_price: number; basis_source: string; unrealized_pnl: number }[];
+    upgraded: { symbol: string; stop_loss_price: number | null; take_profit_price: number | null; note: string }[];
     skipped: { symbol: string; reason: string }[];
     note: string;
   }>("/api/sync-holdings"),
