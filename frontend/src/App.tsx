@@ -894,15 +894,17 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
 
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
-  const handleSync = async () => {
+  const runSync = async (opts?: { manage_exits?: boolean; rebase_basis?: boolean }) => {
     setSyncing(true);
     setSyncResult(null);
     try {
-      const r = await api.syncHoldings();
-      const syncedTxt = r.synced.length
-        ? r.synced.map((s) => `${s.symbol} (${formatCurrency(s.value_usd)})`).join(", ")
-        : "none";
-      setSyncResult(`Synced: ${syncedTxt}. Skipped: ${r.skipped.length}.`);
+      const r = await api.syncHoldings(opts);
+      const parts: string[] = [];
+      if (r.synced.length) parts.push(`Synced ${r.synced.length} new`);
+      if (r.upgraded?.length) parts.push(`Now managing exits on ${r.upgraded.map((u) => u.symbol).join(", ")}`);
+      if (r.rebased?.length) parts.push(`Refreshed cost basis on ${r.rebased.length}`);
+      if (!parts.length) parts.push(`No changes (skipped ${r.skipped.length})`);
+      setSyncResult(parts.join(". ") + ".");
       onReset();
     } catch (err) {
       setSyncResult(err instanceof Error ? err.message : "Sync failed.");
@@ -924,20 +926,34 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
           <StatRow label="Allowed trading pairs" value={config.allowed_pairs.length} />
           <div className="space-y-2">
             <p className="text-xs text-foreground-muted leading-relaxed">
-              Register crypto you already hold on Coinbase as tracked positions
-              so the bot manages their exits (take-profit / stop-loss). Entry is
-              set to the current price. Don't sync a coin you want to hold long-term.
+              Register crypto you already hold on Coinbase as tracked positions.
+              <strong> Sync</strong> adds them hold-only (tracked, never sold).
+              <strong> Manage exits</strong> hands them to the bot with ATR-scaled
+              take-profit / stop-loss and refreshes cost basis from your buy
+              history — this also upgrades positions you already synced. Don't
+              manage a coin you want to hold long-term.
             </p>
             {syncResult && <p className="text-xs text-foreground-muted">{syncResult}</p>}
-            <button
-              type="button"
-              onClick={handleSync}
-              disabled={syncing}
-              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-all disabled:opacity-50"
-            >
-              <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
-              {syncing ? "Syncing…" : "Sync holdings from Coinbase"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => runSync()}
+                disabled={syncing}
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+                {syncing ? "Syncing…" : "Sync holdings (hold-only)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => runSync({ manage_exits: true, rebase_basis: true })}
+                disabled={syncing}
+                className="inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/20 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+                {syncing ? "Working…" : "Manage exits + refresh basis"}
+              </button>
+            </div>
           </div>
         </div>
       </SectionCard>
