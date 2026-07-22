@@ -236,11 +236,17 @@ export const api = {
   auditVerify: () => getJSON<AuditVerify>("/api/audit/verify"),
   metabolism: () => getJSON<Metabolism>("/api/metabolism"),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
-  syncHoldings: () => postJSON<{
-    synced: { symbol: string; size: number; entry_price: number; value_usd: number; basis_source?: string; unrealized_pnl?: number }[];
-    rebased: { symbol: string; old_entry_price: number; new_entry_price: number; basis_source: string; unrealized_pnl: number }[];
-    upgraded: { symbol: string; stop_loss_price: number | null; take_profit_price: number | null; note: string }[];
-    skipped: { symbol: string; reason: string }[];
-    note: string;
-  }>("/api/sync-holdings"),
+  syncHoldings: (opts?: { manage_exits?: boolean; rebase_basis?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.manage_exits) params.set("manage_exits", "true");
+    if (opts?.rebase_basis) params.set("rebase_basis", "true");
+    const qs = params.toString();
+    return postJSON<{
+      synced: { symbol: string; size: number; entry_price: number; value_usd: number; basis_source?: string; unrealized_pnl?: number }[];
+      rebased: { symbol: string; old_entry_price: number; new_entry_price: number; basis_source: string; unrealized_pnl: number }[];
+      upgraded: { symbol: string; stop_loss_price: number | null; take_profit_price: number | null; note: string }[];
+      skipped: { symbol: string; reason: string }[];
+      note: string;
+    }>(`/api/sync-holdings${qs ? `?${qs}` : ""}`);
+  },
 };
