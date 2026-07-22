@@ -477,11 +477,29 @@ async def manage_holdings():
     numbers and the monitor books those positions."""
     result = await sync_holdings(manage_exits=True, rebase_basis=True)
     upgraded = result.get("upgraded", [])
-    result["summary"] = (
-        f"Now managing {len(upgraded)} holding(s): "
-        + (", ".join(u["symbol"] for u in upgraded) if upgraded else "none needed upgrading")
-        + ". Reload the Portfolio to see the take-profit / stop-loss levels."
-    )
+
+    # Definitive diagnostic: after the run, list every open position that is
+    # STILL hold-only. If the sync loop couldn't reach a position — e.g. its
+    # coin no longer reports an available balance on Coinbase, so it never
+    # appears in the holdings fetch the upgrade iterates — it shows up here
+    # instead of being silently missed. An empty list means everything is
+    # managed.
+    async with async_session() as session:
+        still = (await session.execute(
+            select(Position).where(Position.status == "open", Position.managed.is_(False))
+        )).scalars().all()
+    still_hold_only = [p.symbol for p in still]
+    result["still_hold_only"] = still_hold_only
+
+    if upgraded:
+        summary = f"Now managing {len(upgraded)} holding(s): " + ", ".join(u["symbol"] for u in upgraded) + "."
+    elif still_hold_only:
+        summary = ("Nothing was upgraded, and these are STILL hold-only: "
+                   + ", ".join(still_hold_only)
+                   + ". They weren't reached by the holdings fetch — send this response to debug.")
+    else:
+        summary = "All positions are already managed — nothing to upgrade."
+    result["summary"] = summary + " Reload the Portfolio to see the levels."
     return result
 
 
