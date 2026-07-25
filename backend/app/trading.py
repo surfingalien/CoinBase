@@ -11,7 +11,7 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import audit, metabolism, regime, strategy_evaluator, strategy_gate
+from app import audit, metabolism, policy, regime, strategy_evaluator, strategy_gate
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
@@ -298,6 +298,42 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             await reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
             await session.commit()
             logger.info(f"Signal {signal_id} rejected by risk manager: {sizing.reason}")
+            return
+
+        # Policy gate: the last hard check before capital moves. risk.py sized
+        # the trade; the policy engine decides whether it is ALLOWED at all —
+        # per-position cap, aggregate exposure, cash reserve, daily entry rate.
+        # It's a floor under the risk engine, so a sizing regression can't
+        # quietly exceed a hard limit. Every verdict lands on the audit chain.
+        entries_today = len([
+            p for p in open_positions
+            if p.opened_at and p.opened_at.date() == datetime.now(timezone.utc).date()
+        ])
+        policy_decision = policy.policy_engine.evaluate(policy.PolicyRequest(
+            action=policy.ACTION_OPEN_POSITION,
+            args={"quote_size_usd": sizing.quote_size_usd, "symbol": symbol},
+            source=policy.SOURCE_WEBHOOK if strategy != "Native_TA_AI" else policy.SOURCE_NATIVE,
+            context={
+                "equity_usd": usd_balance + open_position_value,
+                "open_position_value_usd": open_position_value,
+                "liquid_cash_usd": usd_balance,
+                "entries_today": entries_today,
+            },
+        ))
+        await audit.record(session, "policy_check", signal_id=signal_id, symbol=symbol, payload={
+            "action": policy_decision.action,
+            "reason_code": policy_decision.reason_code,
+            "reason": policy_decision.human_message,
+            "rules_evaluated": policy_decision.rules_evaluated,
+            "rules_triggered": policy_decision.rules_triggered,
+        })
+        if not policy_decision.allowed:
+            await reject(f"{signal.ai_reasoning} [Policy: {policy_decision.human_message}]")
+            await session.commit()
+            logger.warning(
+                f"Signal {signal_id} blocked by policy "
+                f"({policy_decision.reason_code}): {policy_decision.human_message}"
+            )
             return
 
         order_result = await exchange.place_market_order(
