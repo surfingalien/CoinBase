@@ -28,46 +28,95 @@ from app.risk import (
 )
 
 
+# A sell that delivers at least this fraction of the requested size counts as
+# a full close; the remainder is dust below an exchange increment.
+_FULL_CLOSE_FILL_RATIO = 0.99
+
+
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
-    """Sells exactly the position's size and records realized P&L."""
+    """Sells the position and records realized P&L on what ACTUALLY filled.
+
+    A live SELL is not guaranteed to move the whole requested size: the
+    exchange client caps the order at the balance actually held and floors it
+    to the product's base increment, so whenever the DB's size overstates the
+    real holding (drift, or the duplicate-row bug) the fill comes back short.
+    Booking that as a full close would compute P&L on coins that were never
+    sold and mark the position closed while real coins remain — silently
+    orphaning them. So: all money math uses filled_size, and a materially
+    short fill REDUCES the position instead of closing it, leaving the
+    remainder to be retried (or surfaced as a failure the audit trail
+    explains) rather than lost.
+    """
+    requested = position.size or 0.0
     order_result = await exchange.place_market_order(
-        symbol=position.symbol, side="SELL", base_size=position.size,
+        symbol=position.symbol, side="SELL", base_size=requested,
     )
     if not order_result.get("success"):
         logger.error(f"Close failed for {position.symbol}: {order_result.get('error')}")
         await audit.record(session, "order_failed", symbol=position.symbol, payload={
-            "side": "SELL", "size": position.size, "reason": reason,
+            "side": "SELL", "size": requested, "reason": reason,
             "error": str(order_result.get("error")),
         })
         return False
 
     exit_price = order_result["avg_price"]
     exit_fees = order_result.get("fees_usd") or 0.0
+    # Never trust the request over the fill.
+    filled = float(order_result.get("filled_size") or 0.0)
+    if filled <= 0:
+        logger.error(f"Close for {position.symbol} reported success with a zero fill; leaving position open")
+        await audit.record(session, "order_failed", symbol=position.symbol, payload={
+            "side": "SELL", "size": requested, "reason": reason,
+            "error": "order reported success but filled_size was zero",
+        })
+        return False
+
     session.add(Order(
         symbol=position.symbol,
         side="SELL",
-        quote_size_usd=position.size * exit_price,
-        size=position.size,
+        quote_size_usd=filled * exit_price,
+        size=filled,
         avg_fill_price=exit_price,
         fees_usd=exit_fees,
         status="filled",
         is_live=exchange.is_live,
     ))
-    position.current_price = exit_price
-    # Realized P&L is net cash: sale proceeds minus purchase cost, with the
-    # fees actually charged on both sides taken out — matching the account.
-    position.realized_pnl = (
-        (exit_price - position.entry_price) * position.size
+
+    # Entry fees are apportioned to the fraction actually sold, so a partial
+    # exit doesn't charge the whole entry cost against part of the position.
+    sold_fraction = min(1.0, filled / requested) if requested > 0 else 1.0
+    realized = (
+        (exit_price - position.entry_price) * filled
         - exit_fees
-        - (position.entry_fees_usd or 0.0)
+        - (position.entry_fees_usd or 0.0) * sold_fraction
     )
-    position.unrealized_pnl = 0.0
-    position.status = "closed"
-    position.closed_at = datetime.now(timezone.utc)
-    position.exit_reason = reason
+    position.current_price = exit_price
+
+    if sold_fraction >= _FULL_CLOSE_FILL_RATIO:
+        position.realized_pnl = (position.realized_pnl or 0.0) + realized
+        position.unrealized_pnl = 0.0
+        position.status = "closed"
+        position.closed_at = datetime.now(timezone.utc)
+        position.exit_reason = reason
+    else:
+        # Partial: bank what was sold, keep the rest of the position alive.
+        remaining = max(0.0, requested - filled)
+        position.realized_pnl = (position.realized_pnl or 0.0) + realized
+        position.size = remaining
+        position.entry_fees_usd = (position.entry_fees_usd or 0.0) * (1 - sold_fraction)
+        position.unrealized_pnl = (exit_price - position.entry_price) * remaining
+        logger.warning(
+            f"[PARTIAL EXIT] {position.symbol}: sold {filled:.8f} of {requested:.8f} "
+            f"({sold_fraction:.1%}); {remaining:.8f} left open. Usually means the "
+            f"tracked size exceeded the balance actually held."
+        )
+
     await audit.record(session, "position_closed", symbol=position.symbol, payload={
         "position_id": position.id,
-        "size": position.size,
+        "requested_size": requested,
+        "filled_size": filled,
+        "partial": sold_fraction < _FULL_CLOSE_FILL_RATIO,
+        "remaining_size": position.size if sold_fraction < _FULL_CLOSE_FILL_RATIO else 0.0,
         "entry_price": position.entry_price,
         "exit_price": exit_price,
         "realized_pnl": position.realized_pnl,
@@ -305,10 +354,16 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         # per-position cap, aggregate exposure, cash reserve, daily entry rate.
         # It's a floor under the risk engine, so a sizing regression can't
         # quietly exceed a hard limit. Every verdict lands on the audit chain.
-        entries_today = len([
-            p for p in open_positions
-            if p.opened_at and p.opened_at.date() == datetime.now(timezone.utc).date()
-        ])
+        # Count today's entries from filled BUY ORDERS, not from currently-open
+        # positions: a position opened and closed today is still an entry, and
+        # counting only open ones would let a rapid open/close churn slip past
+        # the daily cap — exactly the behaviour the cap exists to stop.
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        entries_today = len((await session.execute(
+            select(Order).where(
+                Order.side == "BUY", Order.status == "filled", Order.timestamp >= today_start
+            )
+        )).scalars().all())
         policy_decision = policy.policy_engine.evaluate(policy.PolicyRequest(
             action=policy.ACTION_OPEN_POSITION,
             args={"quote_size_usd": sizing.quote_size_usd, "symbol": symbol},
