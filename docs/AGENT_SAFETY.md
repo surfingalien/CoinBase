@@ -85,6 +85,47 @@ self-deletion. Exits always run, and a human can always intervene.
   order`); the LLM never selects actions. Worth porting only if/when an
   agentic action loop is added.
 
+## Policy engine (built)
+
+`backend/app/policy.py` is the enforcement half of R10's governance: before any
+consequential action, a request passes through declarative, priority-ordered
+rules that can **DENY** it or **QUARANTINE** it for human approval. The engine
+is pure — it returns a verdict and never acts — so every limit is testable
+without touching an exchange. Verdicts land on the audit chain
+(`policy_check`), and `GET /api/policy` lists the rules with current state.
+
+| Rule | Enforces |
+|---|---|
+| `financial.max_position_size` | one entry ≤ `MAX_POSITION_PCT_OF_PORTFOLIO` of equity |
+| `financial.total_exposure_cap` | aggregate deployed ≤ `MAX_TOTAL_EXPOSURE_PCT` |
+| `financial.minimum_cash_reserve` | an entry must leave a minimum order in cash |
+| `financial.daily_inference_cap` | hard ceiling on daily LLM spend |
+| `ratelimit.max_trades_per_day` | entries per UTC day |
+| `authority.external_high_risk` | webhook sources may not replicate or change config |
+| `authority.replica_requires_human` | replication quarantines for approval |
+
+Two invariants are pinned by tests and must never regress:
+
+1. **An exit is never policy-blocked** — from any source, in any state. A bot
+   that can enter but not leave is worse than one that can do neither.
+2. **A DENY always beats a QUARANTINE**, regardless of rule order.
+
+This is a *floor under* `risk.py`, not a replacement: risk sizes the trade,
+policy decides whether it is permitted at all, so a sizing regression cannot
+quietly exceed a hard limit.
+
+## Replication: proposal-only, human-gated (built)
+
+`backend/app/replication.py` implements the half of self-replication that is
+safe to automate — the **reasoning** — and stops at the half that is not. The
+bot can `assess()` whether a replica is economically justified (self-sustaining,
+runway past `REPLICATION_MIN_RUNWAY_DAYS`, and a real closed-trade record, so it
+can't replicate on a lucky week) and record a **proposal**. It cannot provision,
+fund, or deploy anything: `assess()` is pure (a test asserts it has no network,
+DB, or subprocess access), the policy engine quarantines every proposal, and
+even a human "approve" only records consent — deployment stays a separate manual
+act.
+
 ## Deliberately not built
 
 Autonomous **self-replication** (provisioning infra and spawning copies) and

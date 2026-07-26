@@ -157,6 +157,28 @@ class CostEvent(Base):
     detail = Column(JSON, nullable=True)     # e.g. {"model":..., "input_tokens":..., "output_tokens":...}
 
 
+class ReplicaProposal(Base):
+    """A PROPOSAL to run a second instance — never a provisioned replica.
+
+    The automaton may argue for its own replication (it has the economics to
+    justify one), but it cannot act on that argument: a proposal lands here as
+    'pending' and only a human moves it to 'approved' or 'rejected'. Even
+    'approved' means "a human agreed", not "a machine was created" — actual
+    deployment stays a deliberate human step. This is the brake that keeps a
+    self-replicating, money-moving system reviewable.
+    """
+    __tablename__ = "replica_proposals"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    created_at = Column(DateTime, default=_now, index=True)
+    status = Column(String, default="pending", index=True)  # pending, approved, rejected
+    rationale = Column(Text)                 # why the bot thinks it's warranted
+    economics = Column(JSON, nullable=True)  # runway//cost snapshot at proposal time
+    decided_at = Column(DateTime, nullable=True)
+    decided_by = Column(String, nullable=True)
+    decision_note = Column(Text, nullable=True)
+
+
 class StrategyStatus(Base):
     """The evaluator's verdict on each strategy: 'active' strategies trade
     normally; 'demoted' ones are blocked from opening new positions until the

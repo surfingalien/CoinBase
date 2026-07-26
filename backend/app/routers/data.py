@@ -704,6 +704,116 @@ async def get_metabolism():
         return await metabolism.summarize(session, liquid, open_position_value=open_value)
 
 
+@router.get("/policy")
+async def get_policy():
+    """The hard limits governing every consequential action, and what they'd
+    say about the current account state. Read-only — evaluating a rule never
+    performs the action it governs."""
+    from app import policy as policy_mod
+
+    try:
+        exchange = get_exchange()
+        cash = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        deployed = sum((p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+                       for p in open_positions)
+        today = datetime.now(timezone.utc).date()
+        entries_today = len([p for p in open_positions
+                             if p.opened_at and p.opened_at.date() == today])
+
+    return {
+        "rules": [
+            {"id": r.id, "description": r.description, "priority": r.priority,
+             "applies_to": list(r.applies_to)}
+            for r in policy_mod.policy_engine.rules
+        ],
+        "limits": {
+            "max_position_pct_of_portfolio": settings.max_position_pct_of_portfolio,
+            "max_total_exposure_pct": settings.max_total_exposure_pct,
+            "max_daily_llm_spend_usd": settings.max_daily_llm_spend_usd,
+            "max_entries_per_day": settings.max_entries_per_day,
+        },
+        "current_state": {
+            "liquid_cash_usd": round(cash, 2),
+            "open_position_value_usd": round(deployed, 2),
+            "equity_usd": round(cash + deployed, 2),
+            "entries_today": entries_today,
+        },
+    }
+
+
+@router.get("/replication")
+async def get_replication():
+    """Replica proposals and their human verdicts. The bot may argue for a
+    second instance; only a human approves, and approval provisions nothing."""
+    from app.models import ReplicaProposal
+
+    async with async_session() as session:
+        proposals = (await session.execute(
+            select(ReplicaProposal).order_by(ReplicaProposal.created_at.desc()).limit(20)
+        )).scalars().all()
+    return {
+        "enabled": settings.replication_enabled,
+        "min_runway_days": settings.replication_min_runway_days,
+        "proposals": [
+            {"id": p.id, "created_at": p.created_at.isoformat() if p.created_at else None,
+             "status": p.status, "rationale": p.rationale, "economics": p.economics,
+             "decided_at": p.decided_at.isoformat() if p.decided_at else None,
+             "decided_by": p.decided_by, "decision_note": p.decision_note}
+            for p in proposals
+        ],
+        "note": ("A proposal is a recorded argument, never a provisioned machine. "
+                 "Approving records human consent; deployment stays a manual step."),
+    }
+
+
+@router.post("/replication/propose")
+async def propose_replication():
+    """Have the bot assess whether a replica is economically justified and
+    record the proposal for human review. Provisions nothing."""
+    from app import replication
+
+    try:
+        exchange = get_exchange()
+        cash = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        deployed = sum((p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+                       for p in open_positions)
+        summary = await metabolism.summarize(session, cash, open_position_value=deployed)
+        closed_count = len((await session.execute(
+            select(Position).where(Position.status == "closed")
+        )).scalars().all())
+        result = await replication.propose(session, summary, closed_count,
+                                           source=replication.policy.SOURCE_HUMAN)
+        await session.commit()
+    return result
+
+
+@router.post("/replication/{proposal_id}/decide")
+async def decide_replication(proposal_id: str, approve: bool, note: str | None = None):
+    """Record a human verdict on a pending replica proposal."""
+    from app import replication
+
+    async with async_session() as session:
+        result = await replication.decide(session, proposal_id, approve, note=note)
+        await session.commit()
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("reason"))
+    return result
+
+
 @router.get("/analyze/compare")
 async def analyze_compare(symbol_a: str = "BTC-USD", symbol_b: str = "ETH-USD"):
     """Ask-the-AI pair comparison: full indicator snapshots, rule-based

@@ -195,6 +195,28 @@ class Settings(BaseSettings):
     # (slower heartbeat = fewer LLM calls = lower burn).
     survival_low_compute_poll_multiplier: float = 3.0
 
+    # ── Policy engine ────────────────────────────────────────────────────
+    # Hard limits enforced before any consequential action (see policy.py).
+    # These are a floor under the risk engine, not a replacement for it: a
+    # sizing regression must not be able to quietly exceed them.
+    # Max USD/day the bot may spend on inference. The metabolism layer already
+    # sheds compute as runway shortens; this is the absolute ceiling — past it,
+    # analysis runs rule-based only until UTC midnight. 0 disables the cap.
+    max_daily_llm_spend_usd: float = 5.0
+    # Max new positions opened per UTC day; a signal storm or a looping
+    # strategy can't churn the account into fees. 0 disables the cap.
+    max_entries_per_day: int = 12
+
+    # ── Replication (gated) ──────────────────────────────────────────────
+    # The bot may PROPOSE running a second instance; it never provisions one.
+    # A human approves a proposal explicitly, and even then approval only
+    # marks it approved — deployment stays a human action. Sovereignty with
+    # the brake left in.
+    replication_enabled: bool = True
+    # A replica proposal is only sensible from a self-sustaining organism:
+    # the proposal is auto-rejected unless runway clears this many days.
+    replication_min_runway_days: float = 60.0
+
 
 settings = Settings()
 
