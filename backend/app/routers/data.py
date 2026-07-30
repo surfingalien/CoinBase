@@ -281,31 +281,17 @@ _holdings_lock = asyncio.Lock()
 
 
 async def _dedupe_positions(exchange) -> dict:
-    """Bookkeeping reconcile of open positions to the real account — NEVER
-    trades. Collapses duplicate rows to one per symbol (sized to the true
-    balance) and closes positions for coins no longer held. Caller holds
-    _holdings_lock."""
-    held = await _live_crypto_holdings(exchange)
-    exchange_sizes = {f"{currency}-USD": amount for currency, amount in held.items()}
-    report: dict = {"deleted": [], "resized": [], "closed_not_held": []}
+    """Manual reconcile, sharing the exact logic the background reconciler
+    runs — so an on-demand cleanup and the automatic one can never diverge.
+    require_confirmation=False because a human asked for it right now and can
+    read the result, rather than waiting for the multi-cycle confirmation the
+    unattended loop uses. Bookkeeping only: never trades."""
+    from app import audit as audit_mod2, reconciler
+
     async with async_session() as session:
-        open_positions = (await session.execute(
-            select(Position).where(Position.status == "open")
-        )).scalars().all()
-        plan = plan_position_dedupe(open_positions, exchange_sizes)
-        for p in plan["delete"]:
-            report["deleted"].append({"symbol": p.symbol, "size": round(p.size or 0.0, 8)})
-            await session.delete(p)
-        for p, new_size in plan["resize"]:
-            report["resized"].append({"symbol": p.symbol, "from": round(p.size or 0.0, 8), "to": round(new_size, 8)})
-            p.size = new_size
-            p.unrealized_pnl = ((p.current_price or p.entry_price) - p.entry_price) * new_size
-        for p in plan["orphan"]:
-            report["closed_not_held"].append({"symbol": p.symbol})
-            p.status = "closed"
-            p.exit_reason = "not_held"
-            p.closed_at = datetime.now(timezone.utc)
-            p.realized_pnl = 0.0
+        report = await reconciler.reconcile(
+            session, exchange, require_confirmation=False, audit_module=audit_mod2,
+        )
         await session.commit()
     return report
 
