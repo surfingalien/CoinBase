@@ -195,6 +195,20 @@ class Settings(BaseSettings):
     # (slower heartbeat = fewer LLM calls = lower burn).
     survival_low_compute_poll_multiplier: float = 3.0
 
+    # ── Holdings reconciliation ──────────────────────────────────────────
+    # The DB's open positions are a CLAIM about what the account holds, and
+    # that claim drifts (manual sells on the exchange, short fills, duplicate
+    # rows). Stale rows silently inflate exposure — blocking new entries —
+    # and fill position slots with phantoms, so the ledger is reconciled to
+    # the exchange automatically instead of waiting for someone to notice.
+    # Bookkeeping only: this NEVER buys or sells.
+    holdings_reconcile_enabled: bool = True
+    holdings_reconcile_interval_seconds: int = 300
+    # How many CONSECUTIVE cycles a coin must be missing from the account
+    # before its position is closed as not-held. A single anomalous (but
+    # successful) exchange response must not be able to wipe the ledger.
+    holdings_absence_confirmations: int = 2
+
     # ── Policy engine ────────────────────────────────────────────────────
     # Hard limits enforced before any consequential action (see policy.py).
     # These are a floor under the risk engine, not a replacement for it: a

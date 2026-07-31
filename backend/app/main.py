@@ -6,7 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app import cross_sectional_monitor, market_analysis_monitor, position_monitor, strategy_evaluator, survival_monitor
+from app import (
+    cross_sectional_monitor, holdings_monitor, market_analysis_monitor,
+    position_monitor, strategy_evaluator, survival_monitor,
+)
 from app.database import init_db
 from app.exchange import reconcile_paper_state
 from app.routers import data, webhook
@@ -24,12 +27,14 @@ async def lifespan(app: FastAPI):
     cross_sectional_monitor.start()
     strategy_evaluator.start()
     survival_monitor.start()
+    holdings_monitor.start()
     yield
     await position_monitor.stop()
     await market_analysis_monitor.stop()
     await cross_sectional_monitor.stop()
     await strategy_evaluator.stop()
     await survival_monitor.stop()
+    await holdings_monitor.stop()
 
 
 app = FastAPI(title="GainzAI Crypto Trading System", lifespan=lifespan)
