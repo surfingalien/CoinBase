@@ -71,7 +71,14 @@ class Settings(BaseSettings):
     # Runs with pure rule-based confluence scoring if ANTHROPIC_API_KEY is
     # unset; uses Claude for the reasoning/confidence when it is set.
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-8"
+    # Token spend is the largest non-trading cost, and on a small account it
+    # sets the return the bot must earn just to pay for itself: at Opus rates
+    # (5/25 per 1M tokens) a ~$400 account needs ~0.68%/day before a dollar is
+    # profit; Haiku (1/5) puts that at ~0.17%/day. Model quality matters less
+    # here than the price does, because the rule-based confluence gate runs
+    # first either way — the LLM refines and can veto a decision, it never
+    # originates one. See docs/AGENT_SAFETY.md.
+    anthropic_model: str = "claude-haiku-4-5"
     market_analysis_poll_interval_seconds: int = 900
     market_analysis_min_confidence: float = 0.60
     market_analysis_granularity_seconds: int = 3600  # Coinbase candle bucket: 60,300,900,3600,21600,86400
@@ -189,7 +196,11 @@ class Settings(BaseSettings):
     llm_output_cost_per_mtok: float = 25.0
     llm_low_compute_input_cost_per_mtok: float = 1.0
     llm_low_compute_output_cost_per_mtok: float = 5.0
-    # Cheaper model the survival loop switches to when shedding compute.
+    # Cheaper model the survival loop switches to when shedding compute. When
+    # anthropic_model is already the cheapest tier (the default), this switch
+    # is a no-op and shedding falls entirely to the slower poll interval below
+    # — which is the larger lever anyway: halving the call count saves more
+    # than any remaining model downgrade could.
     llm_low_compute_model: str = "claude-haiku-4-5"
     # Runway thresholds (days). At/under low_days → shed compute; at/under
     # critical_days → also halt new entries. Exits are never halted.
