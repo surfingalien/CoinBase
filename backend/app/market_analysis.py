@@ -40,6 +40,24 @@ _MAX_TOKENS_BASE = 200
 _MAX_TOKENS_PER_CANDIDATE = 120
 _MAX_TOKENS_CAP = 2000
 
+# Model-id prefixes that support the dynamic-filtering web_search variant.
+# Everything else — Haiku included — must be sent the earlier version, or the
+# request is rejected and the cycle falls back to a search-less retry: a wasted
+# call plus the silent loss of the last-24h news check the prompt asks for.
+# Model choice is a cost lever we expect to pull, so this must follow it.
+_DYNAMIC_FILTER_SEARCH_MODELS = (
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-fable-5", "claude-sonnet-5", "claude-sonnet-4-6",
+)
+
+
+def _web_search_tool(model: str) -> Dict[str, Any]:
+    """The web_search tool block this model actually accepts."""
+    supported = any((model or "").startswith(p) for p in _DYNAMIC_FILTER_SEARCH_MODELS)
+    version = "web_search_20260209" if supported else "web_search_20250305"
+    return {"type": version, "name": "web_search", "max_uses": 3}
+
+
 _anthropic_client = None
 
 
@@ -269,15 +287,16 @@ async def _analyze_batch_with_claude(candidates: List[Dict[str, Any]],
     content = _batch_prompt(candidates, sentiment_block, research_enabled)
 
     async def _call(with_tools: bool):
+        # Survival-tier aware: the cheaper model when the metabolism loop has
+        # told us to shed compute, the default model otherwise.
+        model = metabolism.active_model()
         kwargs: Dict[str, Any] = dict(
-            # Survival-tier aware: the cheaper model when the metabolism loop
-            # has told us to shed compute, the default model otherwise.
-            model=metabolism.active_model(),
+            model=model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": content}],
         )
         if with_tools:
-            kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+            kwargs["tools"] = [_web_search_tool(model)]
         return await client.messages.create(**kwargs)
 
     try:
@@ -338,15 +357,16 @@ async def run_ai_selftest(symbol: str = "BTC-USD") -> Dict[str, Any]:
         content = _batch_prompt([prep], sentiment_block, research_enabled)
 
         async def _call(with_tools: bool):
+            # Same survival-tier model selection as the live analysis path, so
+            # the selftest probes what the bot is actually using.
+            model = metabolism.active_model()
             kwargs: Dict[str, Any] = dict(
-                # Same survival-tier model selection as the live analysis path,
-                # so the selftest probes what the bot is actually using.
-                model=metabolism.active_model(),
+                model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": content}],
             )
             if with_tools:
-                kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+                kwargs["tools"] = [_web_search_tool(model)]
             return await client.messages.create(**kwargs)
 
         try:

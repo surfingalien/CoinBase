@@ -55,12 +55,32 @@ def test_tier_ladder():
 
 
 def test_llm_pricing_by_model():
+    """Both configured models must price from _MODEL_PRICES, and every call
+    must land in the buffer — an unbuffered call is burn the runway never
+    sees."""
     metabolism.reset_state()
+    main_in, main_out = metabolism._price_for(settings.anthropic_model)
     main = metabolism.record_llm_usage(settings.anthropic_model, 1_000_000, 1_000_000)
-    assert main == pytest.approx(settings.llm_input_cost_per_mtok + settings.llm_output_cost_per_mtok)
+    assert main == pytest.approx(main_in + main_out)
+
+    low_in, _ = metabolism._price_for(settings.llm_low_compute_model)
     cheap = metabolism.record_llm_usage(settings.llm_low_compute_model, 1_000_000, 0)
-    assert cheap == pytest.approx(settings.llm_low_compute_input_cost_per_mtok)
+    assert cheap == pytest.approx(low_in)
+
+    # Whatever the configured pair is, shedding must never cost more.
+    assert cheap <= main
     assert len(metabolism._pending_llm) == 2
+
+
+def test_configured_models_are_priced_from_the_table_not_the_fallback():
+    """The fallback settings exist for ids the table doesn't know. If a
+    configured model ever falls through to them, the burn silently reverts to
+    whatever those constants happen to say — the exact failure PR #51 fixed."""
+    for model in (settings.anthropic_model, settings.llm_low_compute_model):
+        assert any(model.startswith(p) for p in metabolism._MODEL_PRICES), (
+            f"{model} is not in _MODEL_PRICES — add it, or its cost will be "
+            f"booked at the unknown-model fallback rate"
+        )
 
 
 def test_pricing_follows_the_model_that_actually_ran(monkeypatch):
