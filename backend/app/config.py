@@ -177,15 +177,20 @@ class Settings(BaseSettings):
     metabolism_window_days: int = 7          # trailing window for cost/revenue rates
     # PLACEHOLDER — set to your real monthly hosting bill (Railway/VPS/etc.).
     infra_monthly_cost_usd: float = 5.0
-    # Anthropic token pricing, USD per 1M tokens. PLACEHOLDERS at approximate
-    # list prices for the configured models — override to match your plan.
-    # Used only for cost accounting, never for trading math.
-    llm_input_cost_per_mtok: float = 15.0
-    llm_output_cost_per_mtok: float = 75.0
+    # Anthropic token pricing, USD per 1M tokens, at list price for the models
+    # configured above — override to match your plan. Used only for cost
+    # accounting, never for trading math. These must track `anthropic_model`:
+    # pricing them too high overstates burn, which shortens the computed runway
+    # and can downshift the survival tier (and damp entry size) on phantom cost.
+    #   Opus 5 / Opus 4.8 / 4.7 / 4.6 ....  5 / 25
+    #   Sonnet 5 / Sonnet 4.6 ............  3 / 15
+    #   Haiku 4.5 ........................  1 /  5
+    llm_input_cost_per_mtok: float = 5.0
+    llm_output_cost_per_mtok: float = 25.0
     llm_low_compute_input_cost_per_mtok: float = 1.0
     llm_low_compute_output_cost_per_mtok: float = 5.0
     # Cheaper model the survival loop switches to when shedding compute.
-    llm_low_compute_model: str = "claude-haiku-4-5-20251001"
+    llm_low_compute_model: str = "claude-haiku-4-5"
     # Runway thresholds (days). At/under low_days → shed compute; at/under
     # critical_days → also halt new entries. Exits are never halted.
     survival_runway_low_days: float = 30.0
