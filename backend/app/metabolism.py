@@ -51,6 +51,21 @@ from app.models import CostEvent, Position
 TIERS = ("critical", "low_compute", "stable", "sustainable")
 _SHED_TIERS = {"low_compute", "critical"}
 
+# List price, USD per 1M tokens (input, output), keyed by model-id prefix.
+# Consulted BEFORE the configured prices so that changing ANTHROPIC_MODEL alone
+# — the cheapest lever there is when burn gets uncomfortable — can't leave the
+# metabolism costing calls at the old model's rate. Mispricing is not cosmetic:
+# it moves runway, which moves the survival tier, which damps entry size.
+# Longest prefix wins, so a family entry can't shadow a more specific one.
+_MODEL_PRICES: Dict[str, tuple] = {
+    "claude-fable-5":   (10.0, 50.0),
+    "claude-opus-5":     (5.0, 25.0),
+    "claude-opus-4":     (5.0, 25.0),
+    "claude-sonnet-5":   (3.0, 15.0),
+    "claude-sonnet-4":   (3.0, 15.0),
+    "claude-haiku-4-5":  (1.0,  5.0),
+}
+
 # In-memory buffer of LLM cost events not yet persisted. Appended by the hot
 # paths, drained by the survival monitor's flush.
 _pending_llm: List[Dict[str, Any]] = []
@@ -64,14 +79,26 @@ _state: Dict[str, Any] = {"tier": "sustainable", "summary": None, "updated_at": 
 # ── Cost recording (hot path: cheap, no DB) ────────────────────────────────
 
 def _price_for(model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model name. Prefix-tolerant:
-    the API may echo an alias ('claude-haiku-4-5') for a dated id
-    ('claude-haiku-4-5-20251001') or vice versa, and mispricing a cheap call
-    at the expensive tier would overstate burn and could downshift the
-    survival tier on phantom costs."""
-    low = settings.llm_low_compute_model
-    if model and low and (model.startswith(low) or low.startswith(model)):
-        return settings.llm_low_compute_input_cost_per_mtok, settings.llm_low_compute_output_cost_per_mtok
+    """(input, output) USD per 1M tokens for a model name.
+
+    Known models are priced from ``_MODEL_PRICES`` so the burn always reflects
+    the model that actually ran. Anything unrecognised falls back to the
+    configured prices — which is also the escape hatch for a non-list-price
+    plan: name a model the table doesn't know and set the two settings.
+
+    Matching is prefix-tolerant in both directions: the API may echo an alias
+    ('claude-haiku-4-5') for a dated id ('claude-haiku-4-5-20251001') or vice
+    versa, and pricing a cheap call at the expensive tier would overstate burn
+    and could downshift the survival tier on phantom cost.
+    """
+    if model:
+        match = max((p for p in _MODEL_PRICES if model.startswith(p)), key=len, default=None)
+        if match:
+            return _MODEL_PRICES[match]
+        low = settings.llm_low_compute_model
+        if low and low.startswith(model):
+            return (settings.llm_low_compute_input_cost_per_mtok,
+                    settings.llm_low_compute_output_cost_per_mtok)
     return settings.llm_input_cost_per_mtok, settings.llm_output_cost_per_mtok
 
 

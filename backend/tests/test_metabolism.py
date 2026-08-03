@@ -63,6 +63,39 @@ def test_llm_pricing_by_model():
     assert len(metabolism._pending_llm) == 2
 
 
+def test_pricing_follows_the_model_that_actually_ran(monkeypatch):
+    """Switching models is the cheapest lever on burn — and the easiest place
+    to leave the accounting pointing at the old, dearer rate. Runway is
+    computed from this number, and runway sets the survival tier."""
+    monkeypatch.setattr(settings, "anthropic_model", "claude-sonnet-5", raising=False)
+    # ...while the configured prices still say Opus. The table must win.
+    monkeypatch.setattr(settings, "llm_input_cost_per_mtok", 5.0, raising=False)
+    monkeypatch.setattr(settings, "llm_output_cost_per_mtok", 25.0, raising=False)
+    assert metabolism._price_for("claude-sonnet-5") == (3.0, 15.0)
+    assert metabolism._price_for("claude-haiku-4-5") == (1.0, 5.0)
+    assert metabolism._price_for("claude-opus-5") == (5.0, 25.0)
+
+
+def test_pricing_tolerates_a_dated_model_id():
+    """The API may echo 'claude-haiku-4-5-20251001' for 'claude-haiku-4-5'."""
+    assert metabolism._price_for("claude-haiku-4-5-20251001") == (1.0, 5.0)
+
+
+def test_longest_prefix_wins():
+    """'claude-opus-4' must not shadow a more specific future entry, and the
+    Sonnet family entry must not swallow a Haiku id."""
+    for model, expected in (("claude-opus-4-8", (5.0, 25.0)),
+                            ("claude-sonnet-4-6", (3.0, 15.0))):
+        assert metabolism._price_for(model) == expected
+
+
+def test_unknown_model_falls_back_to_configured_prices(monkeypatch):
+    """The escape hatch for a non-list-price plan."""
+    monkeypatch.setattr(settings, "llm_input_cost_per_mtok", 0.5, raising=False)
+    monkeypatch.setattr(settings, "llm_output_cost_per_mtok", 2.5, raising=False)
+    assert metabolism._price_for("some-private-deployment") == (0.5, 2.5)
+
+
 def test_cached_state_accessors(monkeypatch):
     monkeypatch.setattr(settings, "metabolism_enabled", True, raising=False)
     metabolism.set_state({"tier": "low_compute"})
