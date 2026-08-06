@@ -36,6 +36,19 @@ from app.risk import (
 # a full close; the remainder is dust below an exchange increment.
 _FULL_CLOSE_FILL_RATIO = 0.99
 
+# Exits that can afford to rest as a post-only limit for the maker fee tier:
+# the target was reached, or the strategy simply no longer wants the position.
+# Nothing is going wrong, so a short wait for a better fill is free.
+#
+# Everything NOT listed here goes out at market, and that is the safety
+# property: a stop-loss or trailing stop fires precisely because price is
+# moving against the position, and a resting sell on the ask side of a falling
+# book may never fill at all. Saving ~25 basis points is not worth turning a
+# bounded loss into an unbounded one. Anything unrecognised — a manual close, a
+# reason added later — is treated as protective by omission, which is the safe
+# default rather than an oversight.
+PATIENT_EXIT_REASONS = frozenset({"take_profit", "sell_signal"})
+
 
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
     """Sells the position and records realized P&L on what ACTUALLY filled.
@@ -54,6 +67,7 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
     requested = position.size or 0.0
     order_result = await exchange.place_market_order(
         symbol=position.symbol, side="SELL", base_size=requested,
+        allow_maker=reason in PATIENT_EXIT_REASONS,
     )
     if not order_result.get("success"):
         logger.error(f"Close failed for {position.symbol}: {order_result.get('error')}")

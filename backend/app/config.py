@@ -153,13 +153,22 @@ class Settings(BaseSettings):
 
     # Maker entries: place BUYs as post-only limit orders at the best bid
     # (maker fee tier, ~0.35% vs ~0.6% taker) and fall back to a market order
-    # for whatever hasn't filled after the timeout. Exits always stay market
-    # orders — when a stop fires, getting out beats saving basis points.
+    # for whatever hasn't filled after the timeout.
     # ON by default (owner opt-in): the maker path falls back to a plain
     # market order on any failure, so worst case matches the old behaviour.
     maker_entries_enabled: bool = True
     maker_fee_pct: float = 0.0035
     maker_fill_timeout_seconds: int = 45
+    # Same treatment for exits that can afford to wait — take-profits and
+    # discretionary sell signals. Measured across live trades, exits were the
+    # expensive half of the round trip: taker fee plus market-order slippage on
+    # thin books ran ~1.8% per round trip against a 0.95% fee assumption.
+    #
+    # PROTECTIVE exits are deliberately excluded and always go out at market
+    # (see PATIENT_EXIT_REASONS in trading.py). Resting on the ask while price
+    # falls through a stop is how a small loss becomes a large one; 25 basis
+    # points is not worth that risk.
+    maker_exits_enabled: bool = True
 
     # Fee-expectancy guard: an entry is rejected when the assumed round-trip
     # fees would consume at least this fraction of the distance to its

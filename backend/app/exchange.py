@@ -169,6 +169,7 @@ class Exchange(Protocol):
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]: ...
 
     async def get_usd_balance(self) -> float: ...
@@ -266,6 +267,7 @@ class MockExchange:
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]:
         price = await self.get_price(symbol)
 
@@ -295,7 +297,15 @@ class MockExchange:
                 logger.warning(f"[PAPER TRADE] Holdings ledger shows {held} {symbol} but selling {base_size}")
             filled_size = base_size
             gross = base_size * price
-            fees_usd = gross * settings.paper_fee_pct
+            # A patient exit rests as a post-only limit and pays the maker
+            # tier; a protective one leaves at market and pays taker. Modelling
+            # that here keeps paper P&L honest about the setting, the same way
+            # the BUY side already tracks maker entries — otherwise paper looks
+            # identical whether maker exits are on or off.
+            exit_fee_pct = (settings.maker_fee_pct
+                            if allow_maker and settings.maker_exits_enabled
+                            else settings.paper_fee_pct)
+            fees_usd = gross * exit_fee_pct
             self.holdings[symbol] = max(0.0, held - base_size)
             self.usd_balance += gross - fees_usd
 
@@ -638,6 +648,118 @@ class CoinbaseExchange:
         return {"success": True, "order_id": order_id, "filled_size": size,
                 "avg_price": avg_price, "fees_usd": fees_usd}
 
+    async def _maker_sell(self, symbol: str, base_size: float, ticker_price: float) -> Dict[str, Any]:
+        """Exit at the maker fee tier: post-only limit at the best ask, polled
+        until MAKER_FILL_TIMEOUT_SECONDS, then cancelled — and whatever remains
+        unsold goes out at market so a patient exit can never become a stuck
+        one. Mirrors _maker_buy.
+
+        Only ever reached for exits that can afford to wait (see
+        PATIENT_EXIT_REASONS in trading.py). Protective exits — stop-loss,
+        trailing stop — go straight to market: resting on the ask while price
+        falls away is how a small loss becomes a large one, and saving 25 basis
+        points is not worth that.
+
+        Raises on total failure; the caller falls back to a plain market sell.
+        """
+        import asyncio
+        from decimal import Decimal, ROUND_DOWN, ROUND_UP
+
+        sized_str, sellable = self._sell_size(symbol, base_size)
+
+        product = self._client.get_product(product_id=symbol)
+        base_inc = Decimal(str(product.get("base_increment") or "0.00000001"))
+        quote_inc = Decimal(str(product.get("quote_increment") or "0.01"))
+
+        ask: Optional[float] = None
+        try:
+            book = self._client.get_best_bid_ask(product_ids=[symbol])
+            pricebooks = book.get("pricebooks") or []
+            asks = (pricebooks[0].get("asks") or []) if pricebooks else []
+            ask = float(asks[0]["price"]) if asks else None
+        except Exception:
+            ask = None  # book unavailable — a hair over ticker keeps post-only valid
+        # ROUND_UP: rounding a sell limit DOWN could cross the spread, and
+        # post-only would reject the order outright.
+        limit_price = Decimal(str(ask if ask else ticker_price * 1.0005)).quantize(
+            quote_inc, rounding=ROUND_UP)
+
+        client_order_id = str(uuid.uuid4())
+        result = self._client.limit_order_gtc_sell(
+            client_order_id=client_order_id,
+            product_id=symbol,
+            base_size=sized_str,
+            limit_price=format(limit_price, "f"),
+            post_only=True,
+        )
+        if not result.get("success", False):
+            raise RuntimeError(f"post-only limit sell rejected: {result.get('error_response')}")
+        order_id = result.get("success_response", {}).get("order_id", client_order_id)
+
+        filled: Dict[str, Any] = {}
+        deadline = time.monotonic() + settings.maker_fill_timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            order = self._client.get_order(order_id=order_id).get("order") or {}
+            if order.get("status") in ("FILLED", "CANCELLED", "EXPIRED", "FAILED"):
+                filled = order
+                break
+        if filled.get("status") != "FILLED":
+            try:
+                self._client.cancel_orders(order_ids=[order_id])
+            except Exception:
+                logger.warning(f"Could not cancel maker sell {order_id}; proceeding on its last known state")
+            filled = self._client.get_order(order_id=order_id).get("order") or {}
+
+        fills: List[Dict[str, float]] = []
+        maker_size = float(filled.get("filled_size") or 0)
+        if maker_size > 0:
+            fills.append({
+                "size": maker_size,
+                "price": float(filled.get("average_filled_price") or 0) or float(limit_price),
+                "fees": float(filled.get("total_fees") or 0),
+            })
+
+        # Anything the resting order didn't take goes out at market. An exit
+        # that half-completes and stops is worse than one that pays taker:
+        # _close_position would book a partial and leave the rest exposed.
+        remaining = Decimal(str(sellable - maker_size)).quantize(base_inc, rounding=ROUND_DOWN)
+        if remaining > 0:
+            try:
+                rem_str, _ = self._sell_size(symbol, float(remaining))
+            except ValueError:
+                rem_str = None  # remainder is dust below the exchange minimum
+            if rem_str:
+                market = self._client.market_order_sell(
+                    client_order_id=str(uuid.uuid4()),
+                    product_id=symbol,
+                    base_size=rem_str,
+                )
+                if market.get("success", False):
+                    market_id = market.get("success_response", {}).get("order_id")
+                    market_fill = await self._fetch_actual_fill(market_id) if market_id else None
+                    if market_fill:
+                        fills.append({
+                            "size": market_fill["filled_size"],
+                            "price": market_fill["avg_price"] or ticker_price,
+                            "fees": market_fill["fees_usd"],
+                        })
+                    else:
+                        fills.append({"size": float(remaining), "price": ticker_price, "fees": 0.0})
+                elif not fills:
+                    raise RuntimeError(
+                        f"maker sell unfilled and market fallback rejected: {market.get('error_response')}")
+
+        size, avg_price, fees_usd = combine_fills(fills)
+        if size <= 0:
+            raise RuntimeError("maker exit produced no fill")
+        logger.warning(
+            f"[LIVE TRADE] SELL {symbol} {size:.6f} units @ ${avg_price:,.2f} "
+            f"(maker exit{' + market remainder' if len(fills) > 1 else ''}, fees ${fees_usd:.2f})"
+        )
+        return {"success": True, "order_id": order_id, "filled_size": size,
+                "avg_price": avg_price, "fees_usd": fees_usd}
+
     def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
         """Returns a Coinbase-valid base_size string for a SELL: capped at the
         actually-held balance and floored to the product's base_increment.
@@ -672,6 +794,7 @@ class CoinbaseExchange:
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]:
         client_order_id = str(uuid.uuid4())
         try:
@@ -696,6 +819,14 @@ class CoinbaseExchange:
                     base_size = quote_size / price
                 if not base_size:
                     return {"success": False, "error": "SELL requires base_size"}
+                # Patient exits rest as post-only limits at the maker tier;
+                # protective ones fall through to market below. Opt-in only —
+                # a caller that doesn't ask gets the market order it expects.
+                if allow_maker and settings.maker_exits_enabled:
+                    try:
+                        return await self._maker_sell(symbol, base_size, price)
+                    except Exception:
+                        logger.exception(f"Maker exit for {symbol} failed; falling back to market order")
                 # Floor to the product's increment and cap at the actually-held
                 # balance — a too-precise or rounded-up size is rejected by
                 # Coinbase, which would leave the position open and unsold.

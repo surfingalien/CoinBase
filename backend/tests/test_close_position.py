@@ -27,8 +27,10 @@ class FakeExchange:
         self.price, self.fill_ratio, self.fees, self.success = price, fill_ratio, fees, success
         self.requested = None
 
-    async def place_market_order(self, symbol, side, quote_size=None, base_size=None):
+    async def place_market_order(self, symbol, side, quote_size=None, base_size=None,
+                                 allow_maker=False):
         self.requested = base_size
+        self.allow_maker = allow_maker
         if not self.success:
             return {"success": False, "error": "rejected"}
         return {"success": True, "order_id": "x", "filled_size": base_size * self.fill_ratio,
