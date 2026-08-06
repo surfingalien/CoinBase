@@ -26,9 +26,72 @@ def assumed_round_trip_fee_pct() -> float:
     """The fee cost of one complete trade, matching how orders actually go
     out: the entry pays the maker tier when maker entries are enabled
     (post-only limit at the bid), taker otherwise; the exit always assumes
-    taker because stops and take-profits leave as market orders."""
+    taker because stops and take-profits leave as market orders.
+
+    This is FEES ONLY. Real friction also includes slippage, which on thin
+    books is the larger half — see measured_round_trip_friction_pct.
+    """
     entry_fee = settings.maker_fee_pct if settings.maker_entries_enabled else settings.paper_fee_pct
     return entry_fee + settings.paper_fee_pct
+
+
+# Closed trades needed before measured friction is trusted over the fee
+# constants. Too few and one bad fill sets the floor for everything.
+FRICTION_MIN_SAMPLES = 5
+# How many recent closed trades feed the friction estimate.
+FRICTION_LOOKBACK_TRADES = 30
+# Cap on the measured figure. A position closed at a stale or wrong price
+# produces a nonsense implied friction; without a ceiling one such row could
+# raise the take-profit floor past anything reachable and halt entries.
+FRICTION_SANITY_CAP = 0.10
+
+
+def measured_round_trip_friction_pct(recent_closed: List) -> Optional[float]:
+    """Round-trip friction actually paid, per unit of notional, inferred from
+    closed trades: whatever separates the price move from the realized P&L.
+
+    The fee constants describe fees. What a trade actually gives up is fees
+    PLUS slippage, and market exits on thin books slip hard — measured across
+    live trades the real figure came in around twice the configured one, which
+    silently halved the take-profit floor and let through entries that could
+    not cover their own costs.
+
+    Deriving it from fills means the number tracks reality (venue tier
+    changes, a shift to less liquid pairs) instead of drifting from it.
+
+    Uses the MEDIAN: one position closed at a stale price can't drag the
+    estimate, where a mean would let it. Returns None when there isn't enough
+    history to say anything, so callers fall back to the constants.
+    """
+    samples = []
+    for p in recent_closed:
+        entry, size = getattr(p, "entry_price", 0) or 0, getattr(p, "size", 0) or 0
+        exit_price, pnl = getattr(p, "current_price", None), getattr(p, "realized_pnl", None)
+        if entry <= 0 or size <= 0 or exit_price is None or pnl is None:
+            continue
+        notional = entry * size
+        if notional <= 0:
+            continue
+        friction = ((exit_price - entry) * size - pnl) / notional
+        # Negative implied friction means the books disagree with themselves
+        # (a P&L better than the price move). Don't let it pull the floor down.
+        if 0.0 <= friction <= FRICTION_SANITY_CAP:
+            samples.append(friction)
+
+    if len(samples) < FRICTION_MIN_SAMPLES:
+        return None
+    samples.sort()
+    mid = len(samples) // 2
+    return samples[mid] if len(samples) % 2 else (samples[mid - 1] + samples[mid]) / 2
+
+
+def effective_round_trip_cost_pct(recent_closed: Optional[List] = None) -> float:
+    """What one round trip really costs: the measured figure when there's
+    enough history, else the fee constants. Never returns less than the
+    constants — measurement may only reveal costs, never discount them."""
+    assumed = assumed_round_trip_fee_pct()
+    measured = measured_round_trip_friction_pct(recent_closed or [])
+    return max(assumed, measured) if measured is not None else assumed
 
 
 # Safety margin on the fee floor so a floored target clears the gate's >=
@@ -40,15 +103,22 @@ TAKE_PROFIT_FLOOR_MARGIN = 0.05
 ATR_REACHABILITY_MULTIPLE = 6.0
 
 
-def min_viable_take_profit_pct() -> float:
+def min_viable_take_profit_pct(recent_closed: Optional[List] = None) -> float:
     """The smallest take-profit distance that clears the fee-expectancy gate,
-    with a small margin. 0 when the gate is disabled."""
+    with a small margin. 0 when the gate is disabled.
+
+    Pass recent closed trades to floor against measured friction rather than
+    the fee constants alone; without them this falls back to fees-only, which
+    understates the real cost of a round trip.
+    """
     if settings.max_fee_fraction_of_target <= 0:
         return 0.0
-    return assumed_round_trip_fee_pct() / settings.max_fee_fraction_of_target * (1 + TAKE_PROFIT_FLOOR_MARGIN)
+    cost = effective_round_trip_cost_pct(recent_closed)
+    return cost / settings.max_fee_fraction_of_target * (1 + TAKE_PROFIT_FLOOR_MARGIN)
 
 
-def apply_fee_floor(take_profit_pct: float, price: float, atr: Optional[float]) -> tuple:
+def apply_fee_floor(take_profit_pct: float, price: float, atr: Optional[float],
+                    recent_closed: Optional[List] = None) -> tuple:
     """Reconciles ATR-scale targets with the fee-expectancy gate.
 
     The analyzer's take-profits are sized to volatility (2.5-3x ATR on 1h
@@ -64,7 +134,7 @@ def apply_fee_floor(take_profit_pct: float, price: float, atr: Optional[float]) 
 
     Returns (take_profit_pct, floored).
     """
-    floor = min_viable_take_profit_pct()
+    floor = min_viable_take_profit_pct(recent_closed)
     if floor <= 0 or take_profit_pct <= 0 or take_profit_pct >= floor:
         return take_profit_pct, False
     if price > 0 and atr and floor * price > ATR_REACHABILITY_MULTIPLE * float(atr):
@@ -89,6 +159,47 @@ def atr_exit_levels(entry_price: float, atr: Optional[float]) -> tuple:
     stop = max(0.0, entry_price - settings.atr_stop_multiple * atr)
     target = entry_price + settings.atr_take_profit_multiple * atr
     return round(stop, 8), round(target, 8)
+
+
+def sanitize_exit_levels(entry_price: float,
+                         take_profit_price: Optional[float],
+                         stop_loss_price: Optional[float],
+                         take_profit_pct: Optional[float] = None) -> tuple:
+    """Force the stored exit levels to bracket the price actually paid.
+
+    The levels arrive computed against the signal's price, but the position is
+    opened at the FILL price, and those differ — the signal is minutes old, the
+    book moved, a maker entry rested before filling. When the fill lands past
+    the target, `take_profit_price <= entry_price`, and the position monitor's
+    very first tick reads that as "target reached" and sells. Observed live: a
+    position opened and closed 36 seconds later, price down 0.04%, booked as
+    `take_profit` for a loss that was entirely fees. A mirrored stop above the
+    entry does the same thing through the stop branch.
+
+    Levels that don't bracket the entry are re-derived from it rather than
+    dropped: dropping them falls back to the flat take_profit_pct/stop_loss_pct
+    defaults, which is a silent change of exit policy.
+
+    Returns (take_profit_price, stop_loss_price, corrections) where
+    corrections names what was rebuilt — the caller records it, because a
+    position quietly repriced is a position nobody can audit.
+    """
+    corrections: List[str] = []
+    if entry_price <= 0:
+        return take_profit_price, stop_loss_price, corrections
+
+    if take_profit_price is not None and take_profit_price <= entry_price:
+        distance = take_profit_pct if take_profit_pct and take_profit_pct > 0 else settings.take_profit_pct
+        take_profit_price = round(entry_price * (1 + distance), 8)
+        corrections.append(f"take-profit was at/below the ${entry_price:,.8g} fill, "
+                           f"reset to {distance:.2%} above it")
+
+    if stop_loss_price is not None and stop_loss_price >= entry_price:
+        stop_loss_price = round(entry_price * (1 - settings.stop_loss_pct), 8)
+        corrections.append(f"stop-loss was at/above the ${entry_price:,.8g} fill, "
+                           f"reset to {settings.stop_loss_pct:.2%} below it")
+
+    return take_profit_price, stop_loss_price, corrections
 
 
 def expectancy_stats(recent_closed: List) -> Optional[dict]:

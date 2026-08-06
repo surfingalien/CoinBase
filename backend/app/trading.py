@@ -18,12 +18,16 @@ from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
 from app.risk import (
+    FRICTION_LOOKBACK_TRADES,
     PERFORMANCE_LOOKBACK_TRADES,
     apply_fee_floor,
     assumed_round_trip_fee_pct,
     compute_daily_pnl_pct,
+    effective_round_trip_cost_pct,
     effective_usd_balance,
+    measured_round_trip_friction_pct,
     performance_multiplier,
+    sanitize_exit_levels,
     size_trade,
 )
 
@@ -31,6 +35,19 @@ from app.risk import (
 # A sell that delivers at least this fraction of the requested size counts as
 # a full close; the remainder is dust below an exchange increment.
 _FULL_CLOSE_FILL_RATIO = 0.99
+
+# Exits that can afford to rest as a post-only limit for the maker fee tier:
+# the target was reached, or the strategy simply no longer wants the position.
+# Nothing is going wrong, so a short wait for a better fill is free.
+#
+# Everything NOT listed here goes out at market, and that is the safety
+# property: a stop-loss or trailing stop fires precisely because price is
+# moving against the position, and a resting sell on the ask side of a falling
+# book may never fill at all. Saving ~25 basis points is not worth turning a
+# bounded loss into an unbounded one. Anything unrecognised — a manual close, a
+# reason added later — is treated as protective by omission, which is the safe
+# default rather than an oversight.
+PATIENT_EXIT_REASONS = frozenset({"take_profit", "sell_signal"})
 
 
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
@@ -50,6 +67,7 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
     requested = position.size or 0.0
     order_result = await exchange.place_market_order(
         symbol=position.symbol, side="SELL", base_size=requested,
+        allow_maker=reason in PATIENT_EXIT_REASONS,
     )
     if not order_result.get("success"):
         logger.error(f"Close failed for {position.symbol}: {order_result.get('error')}")
@@ -311,14 +329,31 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         # trades with a cost-covering target instead of being rejected. The
         # stored take-profit is updated to match so the position monitor
         # exits at the floored target, not the original tight one.
+        # Friction is a property of the venue and the book, not of a strategy,
+        # so this pool is deliberately unfiltered — every closed trade is
+        # evidence about what a round trip costs here.
+        friction_sample = (await session.execute(
+            select(Position)
+            .where(Position.status == "closed")
+            .order_by(Position.closed_at.desc())
+            .limit(FRICTION_LOOKBACK_TRADES)
+        )).scalars().all()
+
         take_profit_pct, fee_floored = apply_fee_floor(
-            take_profit_pct, signal_price, signal_data.get("atr")
+            take_profit_pct, signal_price, signal_data.get("atr"), friction_sample
         )
         if fee_floored:
             signal_data["ta_take_profit"] = round(signal_price * (1 + take_profit_pct), 8)
             signal.ai_reasoning += (
                 f" [Fee-aware target: the ATR target was inside the fee floor — "
                 f"take-profit extended to {take_profit_pct:.2%} so the trade clears its costs.]"
+            )
+        measured = measured_round_trip_friction_pct(friction_sample)
+        if measured is not None and measured > assumed_round_trip_fee_pct():
+            signal.ai_reasoning += (
+                f" [Measured round-trip cost is {measured:.2%} vs the "
+                f"{assumed_round_trip_fee_pct():.2%} fee assumption — slippage included; "
+                f"the target floor uses the measured figure.]"
             )
 
         open_position_value = sum(
@@ -329,7 +364,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             ai_size_multiplier=size_multiplier,
             usd_balance=usd_balance,
             daily_pnl_pct=daily_pnl_pct,
-            round_trip_fee_pct=assumed_round_trip_fee_pct(),
+            round_trip_fee_pct=effective_round_trip_cost_pct(friction_sample),
             take_profit_pct=take_profit_pct,
             open_position_value=open_position_value,
         )
@@ -425,6 +460,21 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             status="filled",
             is_live=exchange.is_live,
         ))
+        # The levels were computed against the signal's price; the position is
+        # opened at the FILL price. Where those disagree enough that a level no
+        # longer brackets the entry, the monitor's first tick would exit
+        # immediately at a pure-fee loss — so re-derive from what was paid.
+        tp_price, sl_price, level_fixes = sanitize_exit_levels(
+            entry_price,
+            signal_data.get("ta_take_profit"),
+            signal_data.get("ta_stop_loss"),
+            take_profit_pct,
+        )
+        if level_fixes:
+            logger.warning(f"Signal {signal_id} exit levels corrected for {symbol}: "
+                           f"{'; '.join(level_fixes)}")
+            signal.ai_reasoning += f" [Exit levels corrected: {'; '.join(level_fixes)}.]"
+
         session.add(Position(
             symbol=symbol,
             side="long",
@@ -432,8 +482,8 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             entry_price=entry_price,
             current_price=entry_price,
             peak_price=entry_price,
-            take_profit_price=signal_data.get("ta_take_profit"),
-            stop_loss_price=signal_data.get("ta_stop_loss"),
+            take_profit_price=tp_price,
+            stop_loss_price=sl_price,
             entry_fees_usd=entry_fees,
             strategy=strategy,
             basis_source="trade",
