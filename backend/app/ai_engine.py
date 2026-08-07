@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from loguru import logger
 
-from app import sentiment as sentiment_mod
+from app import injection_defense, metabolism, sentiment as sentiment_mod
 from app.config import KNOWN_STRATEGIES, RISK_TIERS, settings
 
 # Strategies whose SELL signals are re-checked server-side above. Any other
@@ -175,9 +175,11 @@ class AIEngine:
         verification = None
         if strategy == "Native_TA_AI" and signal_data.get("llm_generated"):
             rule_signal = signal_data.get("rule_signal")
+            rule_net_votes = signal_data.get("rule_net_votes")
             verification = {
                 "method": "rule_confluence",
                 "rule_signal": rule_signal,
+                "rule_net_votes": rule_net_votes,
                 "outcome": "agree" if action == "BUY" else "exit_exempt",
             }
             if decision == "EXECUTE" and action == "BUY":
@@ -191,25 +193,42 @@ class AIEngine:
                         "indicators is SELL — contradiction vetoes the entry.]"
                     )
                 elif rule_signal != "BUY":
-                    # The rules see chop where the LLM sees a setup. Trade it
-                    # only if the damped confidence still clears the bar, at
-                    # reduced size.
-                    confidence *= 0.85
+                    # A rule-side HOLD is not one verdict but two. The LLM
+                    # gate deliberately sends borderline setups (|net votes|
+                    # >= 2) to Claude while the rules themselves only act at
+                    # net >= 3 — so a HOLD whose votes lean the SAME way as
+                    # the entry is the expected case, not a disagreement.
+                    # Damping its confidence below the execution threshold
+                    # rejected nearly every LLM entry the gate was designed
+                    # to produce. Same-direction HOLDs now keep their
+                    # confidence and pay only the 0.6x size haircut; HOLDs
+                    # leaning against the entry (or with no vote context)
+                    # remain a real disagreement and keep the old damping.
                     size_multiplier *= 0.6
-                    verification["outcome"] = "unconfirmed_damped"
-                    if confidence < settings.market_analysis_min_confidence:
-                        decision = "REJECT"
-                        verification["outcome"] = "unconfirmed_rejected"
+                    if rule_net_votes is not None and rule_net_votes > 0:
+                        verification["outcome"] = "weak_agreement_damped"
                         reasoning += (
-                            " [Verification: rule-based check reads HOLD; damped "
-                            f"confidence ({confidence:.0%}) no longer clears the "
-                            f"{settings.market_analysis_min_confidence:.0%} threshold.]"
+                            " [Verification: rule-based check reads HOLD but its "
+                            f"confluence leans the same way (net {rule_net_votes:+d}) — "
+                            "entry kept at 0.6x size.]"
                         )
                     else:
-                        reasoning += (
-                            " [Verification: rule-based check reads HOLD — entry kept "
-                            "at reduced confidence and 0.6x size.]"
-                        )
+                        confidence *= 0.85
+                        verification["outcome"] = "unconfirmed_damped"
+                        if confidence < settings.market_analysis_min_confidence:
+                            decision = "REJECT"
+                            verification["outcome"] = "unconfirmed_rejected"
+                            reasoning += (
+                                " [Verification: rule-based check reads HOLD against the "
+                                f"entry; damped confidence ({confidence:.0%}) no longer "
+                                f"clears the {settings.market_analysis_min_confidence:.0%} "
+                                "threshold.]"
+                            )
+                        else:
+                            reasoning += (
+                                " [Verification: rule-based check reads HOLD against the "
+                                "entry — kept at reduced confidence and 0.6x size.]"
+                            )
                 else:
                     reasoning += " [Verification: independent rule-based check agrees.]"
 
@@ -272,18 +291,29 @@ class AIEngine:
             from app.market_analysis import _get_anthropic_client
 
             client = _get_anthropic_client()
+            # signal_data can carry arbitrary webhook-supplied fields; dumping
+            # the whole dict here is the injection vector. Pass only a
+            # whitelisted, sanitized view, and fence it as untrusted data so a
+            # crafted field can't rewrite the instruction. R10 — data, not
+            # instruction; this call only rewords, it never changes the
+            # decision the rule engine already made.
+            safe_signal = injection_defense.sanitize_signal_for_prompt(signal_data)
             prompt = (
-                "You are a risk-averse crypto trading assistant. A rule-based system already "
-                f"made the decision '{decision}' for this signal: {signal_data}. "
+                "You are a risk-averse crypto trading assistant. "
+                f"{injection_defense.UNTRUSTED_INPUT_RULE} "
+                f"A rule-based system already made the decision '{decision}' for this signal, "
+                f"described in the untrusted block below:\n"
+                f"{injection_defense.wrap_untrusted(safe_signal, 'signal fields', source='webhook')}\n"
                 f"Its reasoning was: '{rule_based_reasoning}'. "
                 "Rewrite that reasoning in 1-2 concise, professional sentences for a trading "
                 "dashboard. Do not change the decision or suggest a different action."
             )
             response = await client.messages.create(
-                model=settings.anthropic_model,
+                model=metabolism.active_model(),
                 max_tokens=160,
                 messages=[{"role": "user", "content": prompt}],
             )
+            metabolism.record_llm_usage_from_response(response)
             text = "".join(block.text for block in response.content if block.type == "text").strip()
             return text or rule_based_reasoning
         except Exception:

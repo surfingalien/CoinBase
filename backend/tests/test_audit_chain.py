@@ -4,7 +4,10 @@ against a real SQLite database, not just the pure hash function.
 
 Also covers the cross-method verification contract in the AI engine: an
 LLM-generated Native_TA_AI BUY whose independent rule-based read says SELL
-must be vetoed, HOLD must damp, agreement must pass untouched.
+must be vetoed; a HOLD whose confluence votes lean WITH the entry is weak
+agreement (size haircut only — the gate sends exactly these borderline
+setups to the LLM on purpose); a HOLD leaning against the entry damps
+confidence and can reject; agreement passes untouched.
 """
 import asyncio
 import os
@@ -105,8 +108,12 @@ def test_deleted_event_is_detected(audit_db):
     assert result["first_break"] is not None
 
 
-def _native_signal(action="BUY", rule_signal="BUY", *, llm=True, conf=0.8):
-    return {
+_DEFAULT_NET_VOTES = {"BUY": 3, "HOLD": 2, "SELL": -3}
+
+
+def _native_signal(action="BUY", rule_signal="BUY", *, llm=True, conf=0.8,
+                   net_votes="default"):
+    signal = {
         "symbol": "BTC-USD",
         "action": action,
         "strategy": "Native_TA_AI",
@@ -117,6 +124,11 @@ def _native_signal(action="BUY", rule_signal="BUY", *, llm=True, conf=0.8):
         "rule_signal": rule_signal,
         "rule_confidence": 0.6,
     }
+    if net_votes == "default":
+        net_votes = _DEFAULT_NET_VOTES[rule_signal]
+    if net_votes is not None:
+        signal["rule_net_votes"] = net_votes
+    return signal
 
 
 def test_cross_verification_contradiction_vetoes(monkeypatch):
@@ -133,7 +145,11 @@ def test_cross_verification_contradiction_vetoes(monkeypatch):
     assert result["verification"]["outcome"] == "contradiction_veto"
 
 
-def test_cross_verification_hold_damps(monkeypatch):
+def test_cross_verification_hold_leaning_with_entry_is_weak_agreement(monkeypatch):
+    """The LLM gate sends |net votes| >= 2 setups to Claude while the rules
+    only act at net >= 3, so a bullish-leaning HOLD (net +2) under an LLM BUY
+    is the pipeline's expected bread-and-butter case: size haircut only,
+    confidence untouched — a 65% entry must still execute."""
     from app.ai_engine import ai_engine
     from app.config import settings
 
@@ -141,9 +157,52 @@ def test_cross_verification_hold_damps(monkeypatch):
     monkeypatch.setattr(settings, "sentiment_enabled", False, raising=False)
 
     result = asyncio.get_event_loop().run_until_complete(
-        ai_engine.analyze_signal(_native_signal(rule_signal="HOLD", conf=0.9))
+        ai_engine.analyze_signal(_native_signal(rule_signal="HOLD", conf=0.65, net_votes=2))
+    )
+    assert result["verification"]["outcome"] == "weak_agreement_damped"
+    assert result["decision"] == "EXECUTE"
+    assert result["confidence"] == pytest.approx(0.65)
+    assert result["size_multiplier"] == pytest.approx(0.6)
+
+
+def test_cross_verification_hold_leaning_against_entry_damps(monkeypatch):
+    """A HOLD whose votes lean AGAINST the entry (a contrarian LLM BUY on a
+    net -2 setup) is a genuine disagreement: confidence damps 0.85x and the
+    entry is rejected once it falls below the execution threshold."""
+    from app.ai_engine import ai_engine
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "sentiment_enabled", False, raising=False)
+
+    damped = asyncio.get_event_loop().run_until_complete(
+        ai_engine.analyze_signal(_native_signal(rule_signal="HOLD", conf=0.9, net_votes=-2))
     )
     # 0.9 * 0.85 = 0.765 still clears the default threshold -> damped, not rejected
+    assert damped["verification"]["outcome"] == "unconfirmed_damped"
+    assert damped["decision"] == "EXECUTE"
+    assert damped["confidence"] == pytest.approx(0.9 * 0.85)
+
+    rejected = asyncio.get_event_loop().run_until_complete(
+        ai_engine.analyze_signal(_native_signal(rule_signal="HOLD", conf=0.65, net_votes=-2))
+    )
+    assert rejected["verification"]["outcome"] == "unconfirmed_rejected"
+    assert rejected["decision"] == "REJECT"
+
+
+def test_cross_verification_hold_without_votes_keeps_old_damping(monkeypatch):
+    """Payloads with no rule_net_votes (produced before this field existed)
+    can't prove the HOLD leans with the entry, so they keep the conservative
+    damping path rather than the weak-agreement fast lane."""
+    from app.ai_engine import ai_engine
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "sentiment_enabled", False, raising=False)
+
+    result = asyncio.get_event_loop().run_until_complete(
+        ai_engine.analyze_signal(_native_signal(rule_signal="HOLD", conf=0.9, net_votes=None))
+    )
     assert result["verification"]["outcome"] == "unconfirmed_damped"
     assert result["decision"] == "EXECUTE"
     assert result["confidence"] == pytest.approx(0.9 * 0.85)

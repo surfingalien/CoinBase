@@ -58,6 +58,7 @@ def _add_missing_columns(sync_conn) -> None:
             "managed": "BOOLEAN",
             "day_mark_price": "FLOAT",
             "day_mark_date": "VARCHAR",
+            "basis_source": "VARCHAR",
         },
     }
     inspector = inspect(sync_conn)

@@ -169,11 +169,14 @@ class Exchange(Protocol):
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]: ...
 
     async def get_usd_balance(self) -> float: ...
 
     async def get_account_value(self) -> float: ...
+
+    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]: ...
 
 
 # Only used when Coinbase's public ticker is unreachable (e.g. offline dev).
@@ -256,9 +259,15 @@ class MockExchange:
                 total += amount * await self.get_price(symbol)
         return total
 
+    async def get_recent_buy_fills(self, symbol: str) -> List[Dict[str, float]]:
+        """The paper simulator keeps no fill history — synced positions fall
+        back to the sync-moment price as their basis."""
+        return []
+
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]:
         price = await self.get_price(symbol)
 
@@ -288,7 +297,15 @@ class MockExchange:
                 logger.warning(f"[PAPER TRADE] Holdings ledger shows {held} {symbol} but selling {base_size}")
             filled_size = base_size
             gross = base_size * price
-            fees_usd = gross * settings.paper_fee_pct
+            # A patient exit rests as a post-only limit and pays the maker
+            # tier; a protective one leaves at market and pays taker. Modelling
+            # that here keeps paper P&L honest about the setting, the same way
+            # the BUY side already tracks maker entries — otherwise paper looks
+            # identical whether maker exits are on or off.
+            exit_fee_pct = (settings.maker_fee_pct
+                            if allow_maker and settings.maker_exits_enabled
+                            else settings.paper_fee_pct)
+            fees_usd = gross * exit_fee_pct
             self.holdings[symbol] = max(0.0, held - base_size)
             self.usd_balance += gross - fees_usd
 
@@ -312,6 +329,83 @@ def combine_fills(fills: List[Dict[str, float]]) -> Tuple[float, float, float]:
     fees = sum(f["fees"] for f in fills)
     avg_price = sum(f["size"] * f["price"] for f in fills) / size if size > 0 else 0.0
     return size, avg_price, fees
+
+
+def plan_position_dedupe(positions: List[Any], exchange_sizes: Dict[str, float]) -> Dict[str, list]:
+    """Plan a bookkeeping reconcile of open positions to the real account — NO
+    trading. Sync's read-then-network-I/O-then-create window let concurrent
+    calls create duplicate rows for the same symbol; this collapses them.
+
+    ``positions``: duck-typed objects with .symbol/.size/.managed/.basis_source/
+    .opened_at. ``exchange_sizes``: {symbol: amount} actually held on-exchange.
+
+    For each symbol keep ONE canonical row — preferring a managed one, then a
+    real (fills/trade) basis, then the earliest — delete the duplicate rows,
+    resize the survivor to the true balance, and flag survivors whose coin is
+    no longer held at all. Pure/deterministic so the merge math is testable.
+    Returns {"keep","delete","resize","orphan"}; resize is (position, size)."""
+    by_symbol: Dict[str, list] = {}
+    for p in positions:
+        by_symbol.setdefault(p.symbol, []).append(p)
+
+    keep, delete, resize, orphan = [], [], [], []
+    for symbol, group in by_symbol.items():
+        ranked = sorted(group, key=lambda p: (
+            0 if getattr(p, "managed", None) is True else 1,
+            0 if (getattr(p, "basis_source", None) or "") in ("fills", "fills_partial", "trade") else 1,
+            str(getattr(p, "opened_at", "") or ""),
+        ))
+        canonical = ranked[0]
+        keep.append(canonical)
+        delete.extend(ranked[1:])
+        actual = exchange_sizes.get(symbol, 0.0)
+        if actual <= 0:
+            orphan.append(canonical)
+        elif abs((canonical.size or 0.0) - actual) > max(1e-9, actual * 0.001):
+            resize.append((canonical, actual))
+    return {"keep": keep, "delete": delete, "resize": resize, "orphan": orphan}
+
+
+def cost_basis_from_fills(held_size: float, buy_fills_newest_first: List[Dict[str, float]],
+                          market_price: float) -> Tuple[float, str]:
+    """Reconstructs the cost basis of currently-held coins from BUY fill
+    history, so a synced position's P&L measures from what was actually paid
+    rather than from the sync moment.
+
+    Walks the newest BUY fills backwards until the held size is covered (the
+    coins you still hold are, to a first approximation, the ones you bought
+    most recently — older buys were consumed by intervening sells). Fees are
+    folded into the basis pro-rata, matching how Coinbase reports cost basis.
+    Held coins not covered by visible fills (transfers in, history beyond the
+    API window) are valued at the current market price — the only honest
+    baseline for coins with no visible purchase record.
+
+    Returns (entry_price, basis_source): 'fills' when fills cover ≥99% of the
+    held size, 'fills_partial' when partially covered, 'sync_price' when no
+    usable fills exist.
+    """
+    if held_size <= 0 or not buy_fills_newest_first:
+        return market_price, "sync_price"
+
+    remaining = held_size
+    covered = 0.0
+    cost = 0.0
+    for fill in buy_fills_newest_first:
+        if remaining <= 0:
+            break
+        size, price = fill.get("size", 0.0), fill.get("price", 0.0)
+        if size <= 0 or price <= 0:
+            continue
+        take = min(remaining, size)
+        cost += take * price + (take / size) * fill.get("fees", 0.0)
+        covered += take
+        remaining -= take
+
+    if covered <= 0:
+        return market_price, "sync_price"
+    cost += (held_size - covered) * market_price
+    source = "fills" if covered >= held_size * 0.99 else "fills_partial"
+    return cost / held_size, source
 
 
 class CoinbaseExchange:
@@ -388,6 +482,46 @@ class CoinbaseExchange:
                 except Exception:
                     continue  # no USD market for this asset; skip
         return total
+
+    async def get_recent_buy_fills(self, symbol: str, max_fills: int = 1000) -> List[Dict[str, float]]:
+        """Newest-first BUY fills for a product, normalized to
+        [{'size': base_units, 'price': ..., 'fees': usd}] — the raw material
+        for reconstructing a synced position's true cost basis. Coinbase
+        returns fills most-recent-first; entries priced in quote units
+        (size_in_quote) are converted to base units. Paginates via the fills
+        cursor up to max_fills, since holdings accumulated through many small
+        buys (DCA, dust-sized fills) need deeper history than one page for
+        full basis coverage."""
+        fills: List[Dict[str, float]] = []
+        cursor: Optional[str] = None
+        while len(fills) < max_fills:
+            try:
+                kwargs: Dict[str, Any] = {"product_id": symbol, "limit": 250}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                response = self._client.get_fills(**kwargs)
+            except Exception as exc:
+                raise await _enrich_coinbase_error_async(exc, self._api_key) from exc
+
+            page = response.get("fills", []) or []
+            for fill in page:
+                if str(fill.get("side", "")).upper() != "BUY":
+                    continue
+                try:
+                    price = float(fill.get("price") or 0)
+                    size = float(fill.get("size") or 0)
+                    fees = float(fill.get("commission") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if str(fill.get("size_in_quote", "")).lower() == "true" or fill.get("size_in_quote") is True:
+                    size = size / price if price > 0 else 0.0
+                if size > 0 and price > 0:
+                    fills.append({"size": size, "price": price, "fees": fees})
+
+            cursor = response.get("cursor") or None
+            if not cursor or not page:
+                break
+        return fills
 
     async def _fetch_actual_fill(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Polls the placed order until Coinbase reports its fill, and returns
@@ -514,6 +648,118 @@ class CoinbaseExchange:
         return {"success": True, "order_id": order_id, "filled_size": size,
                 "avg_price": avg_price, "fees_usd": fees_usd}
 
+    async def _maker_sell(self, symbol: str, base_size: float, ticker_price: float) -> Dict[str, Any]:
+        """Exit at the maker fee tier: post-only limit at the best ask, polled
+        until MAKER_FILL_TIMEOUT_SECONDS, then cancelled — and whatever remains
+        unsold goes out at market so a patient exit can never become a stuck
+        one. Mirrors _maker_buy.
+
+        Only ever reached for exits that can afford to wait (see
+        PATIENT_EXIT_REASONS in trading.py). Protective exits — stop-loss,
+        trailing stop — go straight to market: resting on the ask while price
+        falls away is how a small loss becomes a large one, and saving 25 basis
+        points is not worth that.
+
+        Raises on total failure; the caller falls back to a plain market sell.
+        """
+        import asyncio
+        from decimal import Decimal, ROUND_DOWN, ROUND_UP
+
+        sized_str, sellable = self._sell_size(symbol, base_size)
+
+        product = self._client.get_product(product_id=symbol)
+        base_inc = Decimal(str(product.get("base_increment") or "0.00000001"))
+        quote_inc = Decimal(str(product.get("quote_increment") or "0.01"))
+
+        ask: Optional[float] = None
+        try:
+            book = self._client.get_best_bid_ask(product_ids=[symbol])
+            pricebooks = book.get("pricebooks") or []
+            asks = (pricebooks[0].get("asks") or []) if pricebooks else []
+            ask = float(asks[0]["price"]) if asks else None
+        except Exception:
+            ask = None  # book unavailable — a hair over ticker keeps post-only valid
+        # ROUND_UP: rounding a sell limit DOWN could cross the spread, and
+        # post-only would reject the order outright.
+        limit_price = Decimal(str(ask if ask else ticker_price * 1.0005)).quantize(
+            quote_inc, rounding=ROUND_UP)
+
+        client_order_id = str(uuid.uuid4())
+        result = self._client.limit_order_gtc_sell(
+            client_order_id=client_order_id,
+            product_id=symbol,
+            base_size=sized_str,
+            limit_price=format(limit_price, "f"),
+            post_only=True,
+        )
+        if not result.get("success", False):
+            raise RuntimeError(f"post-only limit sell rejected: {result.get('error_response')}")
+        order_id = result.get("success_response", {}).get("order_id", client_order_id)
+
+        filled: Dict[str, Any] = {}
+        deadline = time.monotonic() + settings.maker_fill_timeout_seconds
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            order = self._client.get_order(order_id=order_id).get("order") or {}
+            if order.get("status") in ("FILLED", "CANCELLED", "EXPIRED", "FAILED"):
+                filled = order
+                break
+        if filled.get("status") != "FILLED":
+            try:
+                self._client.cancel_orders(order_ids=[order_id])
+            except Exception:
+                logger.warning(f"Could not cancel maker sell {order_id}; proceeding on its last known state")
+            filled = self._client.get_order(order_id=order_id).get("order") or {}
+
+        fills: List[Dict[str, float]] = []
+        maker_size = float(filled.get("filled_size") or 0)
+        if maker_size > 0:
+            fills.append({
+                "size": maker_size,
+                "price": float(filled.get("average_filled_price") or 0) or float(limit_price),
+                "fees": float(filled.get("total_fees") or 0),
+            })
+
+        # Anything the resting order didn't take goes out at market. An exit
+        # that half-completes and stops is worse than one that pays taker:
+        # _close_position would book a partial and leave the rest exposed.
+        remaining = Decimal(str(sellable - maker_size)).quantize(base_inc, rounding=ROUND_DOWN)
+        if remaining > 0:
+            try:
+                rem_str, _ = self._sell_size(symbol, float(remaining))
+            except ValueError:
+                rem_str = None  # remainder is dust below the exchange minimum
+            if rem_str:
+                market = self._client.market_order_sell(
+                    client_order_id=str(uuid.uuid4()),
+                    product_id=symbol,
+                    base_size=rem_str,
+                )
+                if market.get("success", False):
+                    market_id = market.get("success_response", {}).get("order_id")
+                    market_fill = await self._fetch_actual_fill(market_id) if market_id else None
+                    if market_fill:
+                        fills.append({
+                            "size": market_fill["filled_size"],
+                            "price": market_fill["avg_price"] or ticker_price,
+                            "fees": market_fill["fees_usd"],
+                        })
+                    else:
+                        fills.append({"size": float(remaining), "price": ticker_price, "fees": 0.0})
+                elif not fills:
+                    raise RuntimeError(
+                        f"maker sell unfilled and market fallback rejected: {market.get('error_response')}")
+
+        size, avg_price, fees_usd = combine_fills(fills)
+        if size <= 0:
+            raise RuntimeError("maker exit produced no fill")
+        logger.warning(
+            f"[LIVE TRADE] SELL {symbol} {size:.6f} units @ ${avg_price:,.2f} "
+            f"(maker exit{' + market remainder' if len(fills) > 1 else ''}, fees ${fees_usd:.2f})"
+        )
+        return {"success": True, "order_id": order_id, "filled_size": size,
+                "avg_price": avg_price, "fees_usd": fees_usd}
+
     def _sell_size(self, symbol: str, requested: float) -> Tuple[str, float]:
         """Returns a Coinbase-valid base_size string for a SELL: capped at the
         actually-held balance and floored to the product's base_increment.
@@ -548,6 +794,7 @@ class CoinbaseExchange:
     async def place_market_order(
         self, symbol: str, side: str,
         quote_size: Optional[float] = None, base_size: Optional[float] = None,
+        allow_maker: bool = False,
     ) -> Dict[str, Any]:
         client_order_id = str(uuid.uuid4())
         try:
@@ -572,6 +819,14 @@ class CoinbaseExchange:
                     base_size = quote_size / price
                 if not base_size:
                     return {"success": False, "error": "SELL requires base_size"}
+                # Patient exits rest as post-only limits at the maker tier;
+                # protective ones fall through to market below. Opt-in only —
+                # a caller that doesn't ask gets the market order it expects.
+                if allow_maker and settings.maker_exits_enabled:
+                    try:
+                        return await self._maker_sell(symbol, base_size, price)
+                    except Exception:
+                        logger.exception(f"Maker exit for {symbol} failed; falling back to market order")
                 # Floor to the product's increment and cap at the actually-held
                 # balance — a too-precise or rounded-up size is rejected by
                 # Coinbase, which would leave the position open and unsold.

@@ -181,3 +181,15 @@ def test_notify_soon_outside_an_event_loop_does_not_raise(monkeypatch):
     monkeypatch.setattr(settings, "telegram_chat_id", "1", raising=False)
     monkeypatch.setattr(settings, "telegram_alerts_enabled", True, raising=False)
     notifier.notify_soon("no running loop here")  # must not raise
+
+
+def test_format_exit_labels_a_partial_close_honestly():
+    """main added partial exits: _close_position can bank a partial fill and
+    leave the position OPEN. Reporting that as a plain 'SELL' would tell the
+    user the position is flat when it isn't."""
+    full = notifier.format_exit("BTC-USD", "take_profit", 64000.0, 50.0, 0.05, False)
+    part = notifier.format_exit("BTC-USD", "take_profit", 64000.0, 20.0, 0.05, False,
+                                partial=True, remaining_size=0.004)
+    assert "SELL BTC-USD" in full and "PARTIAL" not in full
+    assert "PARTIAL SELL BTC-USD" in part
+    assert "0.004 still open" in part

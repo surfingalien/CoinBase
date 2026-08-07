@@ -53,14 +53,24 @@ def format_entry(symbol: str, strategy: str, quote_size_usd: float,
 
 def format_exit(symbol: str, reason: str, exit_price: float,
                 realized_pnl: Optional[float], pnl_pct: Optional[float],
-                is_live: bool) -> str:
+                is_live: bool, *, partial: bool = False,
+                remaining_size: Optional[float] = None) -> str:
+    """Exit alert. `realized_pnl` is THIS exit's P&L, not the position's
+    cumulative total — on a partial close the position stays open and keeps
+    accruing, so reporting the running total here would overstate the trade
+    that just happened. A partial is labelled as such rather than implying the
+    position is flat."""
     emoji = "✅" if (realized_pnl or 0) >= 0 else "🔴"
     mode = "LIVE" if is_live else "paper"
     reason_label = reason.replace("_", " ")
+    verb = "PARTIAL SELL" if partial else "SELL"
+    tail = ""
+    if partial and remaining_size is not None:
+        tail = f"\n<i>{remaining_size:.8g} still open</i>"
     return (
-        f"{emoji} <b>SELL {html.escape(symbol)}</b> ({html.escape(reason_label)})\n"
+        f"{emoji} <b>{verb} {html.escape(symbol)}</b> ({html.escape(reason_label)})\n"
         f"Exit {_fmt_usd(exit_price)} · P&amp;L {_fmt_usd(realized_pnl)} ({_fmt_pct(pnl_pct)})\n"
-        f"<i>{mode}</i>"
+        f"<i>{mode}</i>{tail}"
     )
 
 

@@ -104,6 +104,16 @@ class Position(Base):
     day_mark_price = Column(Float, nullable=True)
     day_mark_date = Column(String, nullable=True)  # "YYYY-MM-DD" (UTC)
 
+    # Where entry_price came from, so P&L is always interpretable:
+    #   "trade"         — the bot's own fill (exact basis)
+    #   "fills"         — synced holding, basis reconstructed from Coinbase
+    #                     BUY fill history (matches Coinbase's own P&L view)
+    #   "fills_partial" — fills covered only part of the held size; the rest
+    #                     was valued at the sync-moment price
+    #   "sync_price"    — no visible fills; basis IS the sync-moment price,
+    #                     so P&L measures from sync, not from purchase
+    basis_source = Column(String, nullable=True)
+
 
 class AuditEvent(Base):
     """One link in the tamper-evident audit chain.
@@ -139,6 +149,45 @@ class SystemState(Base):
     key = Column(String, primary_key=True)
     value = Column(String, nullable=True)
     updated_at = Column(DateTime, default=_now)
+
+
+class CostEvent(Base):
+    """One metered operating cost of keeping the automaton alive.
+
+    Trading fees are already netted out of Position.realized_pnl, so the costs
+    tracked HERE are the ones that otherwise go unaccounted: LLM token spend
+    (one row per Claude call) and, if ever metered directly, infrastructure.
+    The metabolism layer sums these over a trailing window to compute burn and
+    runway. Append-only; wiped only by the paper-mode reset."""
+    __tablename__ = "cost_events"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    timestamp = Column(DateTime, default=_now, index=True)
+    category = Column(String, index=True)   # "llm" | "infra"
+    amount_usd = Column(Float, default=0.0)
+    detail = Column(JSON, nullable=True)     # e.g. {"model":..., "input_tokens":..., "output_tokens":...}
+
+
+class ReplicaProposal(Base):
+    """A PROPOSAL to run a second instance — never a provisioned replica.
+
+    The automaton may argue for its own replication (it has the economics to
+    justify one), but it cannot act on that argument: a proposal lands here as
+    'pending' and only a human moves it to 'approved' or 'rejected'. Even
+    'approved' means "a human agreed", not "a machine was created" — actual
+    deployment stays a deliberate human step. This is the brake that keeps a
+    self-replicating, money-moving system reviewable.
+    """
+    __tablename__ = "replica_proposals"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    created_at = Column(DateTime, default=_now, index=True)
+    status = Column(String, default="pending", index=True)  # pending, approved, rejected
+    rationale = Column(Text)                 # why the bot thinks it's warranted
+    economics = Column(JSON, nullable=True)  # runway//cost snapshot at proposal time
+    decided_at = Column(DateTime, nullable=True)
+    decided_by = Column(String, nullable=True)
+    decision_note = Column(Text, nullable=True)
 
 
 class StrategyStatus(Base):

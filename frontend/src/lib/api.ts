@@ -32,6 +32,11 @@ export interface Position {
   take_profit_price: number | null;
   stop_loss_price: number | null;
   unrealized_pnl: number;
+  managed?: boolean;
+  // "trade" = bot's own fill; "fills" = basis reconstructed from Coinbase buy
+  // history; "fills_partial" = partly reconstructed; "sync_price" = P&L
+  // measures from the sync moment, not original purchase.
+  basis_source?: "trade" | "fills" | "fills_partial" | "sync_price";
 }
 
 export interface Portfolio {
@@ -173,6 +178,32 @@ export const BACKTESTABLE_STRATEGIES = [
   "Turtle_Trend",
 ] as const;
 
+export interface Metabolism {
+  enabled: boolean;
+  tier: "sustainable" | "stable" | "low_compute" | "critical";
+  window_days: number;
+  liquid_cash_usd: number;
+  open_position_value_usd: number;
+  equity_usd: number;
+  costs: {
+    llm_usd: number;
+    infra_usd: number;
+    operating_total_usd: number;
+  };
+  revenue: { trading_net_pnl_usd: number };
+  rates_per_day: {
+    operating_cost_usd: number;
+    trading_net_pnl_usd: number;
+    net_cashflow_usd: number;
+  };
+  runway_days: number | null;   // null = self-sustaining (infinite)
+  self_sustaining: boolean;
+  shedding_compute: boolean;
+  entries_halted: boolean;   // only when liquid cash can't fund a minimum order
+  entry_size_multiplier: number;   // 0.5 at critical tier, 1.0 otherwise
+  active_model: string;
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
@@ -203,13 +234,22 @@ export const api = {
   compare: (a: string, b: string) =>
     getJSON<CompareResult>(`/api/analyze/compare?symbol_a=${encodeURIComponent(a)}&symbol_b=${encodeURIComponent(b)}`),
   auditVerify: () => getJSON<AuditVerify>("/api/audit/verify"),
+  metabolism: () => getJSON<Metabolism>("/api/metabolism"),
   controls: () => getJSON<{ trading_paused: boolean; telegram_alerts_configured: boolean }>("/api/controls"),
   pauseTrading: (paused: boolean) =>
     postJSON<{ trading_paused: boolean }>(`/api/controls/pause?paused=${paused}`),
   resetPaperTrading: () => postJSON<{ status: string; usd_balance: number }>("/api/reset"),
-  syncHoldings: () => postJSON<{
-    synced: { symbol: string; size: number; entry_price: number; value_usd: number }[];
-    skipped: { symbol: string; reason: string }[];
-    note: string;
-  }>("/api/sync-holdings"),
+  syncHoldings: (opts?: { manage_exits?: boolean; rebase_basis?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.manage_exits) params.set("manage_exits", "true");
+    if (opts?.rebase_basis) params.set("rebase_basis", "true");
+    const qs = params.toString();
+    return postJSON<{
+      synced: { symbol: string; size: number; entry_price: number; value_usd: number; basis_source?: string; unrealized_pnl?: number }[];
+      rebased: { symbol: string; old_entry_price: number; new_entry_price: number; basis_source: string; unrealized_pnl: number }[];
+      upgraded: { symbol: string; stop_loss_price: number | null; take_profit_price: number | null; note: string }[];
+      skipped: { symbol: string; reason: string }[];
+      note: string;
+    }>(`/api/sync-holdings${qs ? `?${qs}` : ""}`);
+  },
 };

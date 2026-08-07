@@ -71,7 +71,14 @@ class Settings(BaseSettings):
     # Runs with pure rule-based confluence scoring if ANTHROPIC_API_KEY is
     # unset; uses Claude for the reasoning/confidence when it is set.
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-8"
+    # Token spend is the largest non-trading cost, and on a small account it
+    # sets the return the bot must earn just to pay for itself: at Opus rates
+    # (5/25 per 1M tokens) a ~$400 account needs ~0.68%/day before a dollar is
+    # profit; Haiku (1/5) puts that at ~0.17%/day. Model quality matters less
+    # here than the price does, because the rule-based confluence gate runs
+    # first either way — the LLM refines and can veto a decision, it never
+    # originates one. See docs/AGENT_SAFETY.md.
+    anthropic_model: str = "claude-haiku-4-5"
     market_analysis_poll_interval_seconds: int = 900
     market_analysis_min_confidence: float = 0.60
     market_analysis_granularity_seconds: int = 3600  # Coinbase candle bucket: 60,300,900,3600,21600,86400
@@ -146,13 +153,22 @@ class Settings(BaseSettings):
 
     # Maker entries: place BUYs as post-only limit orders at the best bid
     # (maker fee tier, ~0.35% vs ~0.6% taker) and fall back to a market order
-    # for whatever hasn't filled after the timeout. Exits always stay market
-    # orders — when a stop fires, getting out beats saving basis points.
+    # for whatever hasn't filled after the timeout.
     # ON by default (owner opt-in): the maker path falls back to a plain
     # market order on any failure, so worst case matches the old behaviour.
     maker_entries_enabled: bool = True
     maker_fee_pct: float = 0.0035
     maker_fill_timeout_seconds: int = 45
+    # Same treatment for exits that can afford to wait — take-profits and
+    # discretionary sell signals. Measured across live trades, exits were the
+    # expensive half of the round trip: taker fee plus market-order slippage on
+    # thin books ran ~1.8% per round trip against a 0.95% fee assumption.
+    #
+    # PROTECTIVE exits are deliberately excluded and always go out at market
+    # (see PATIENT_EXIT_REASONS in trading.py). Resting on the ask while price
+    # falls through a stop is how a small loss becomes a large one; 25 basis
+    # points is not worth that risk.
+    maker_exits_enabled: bool = True
 
     # Fee-expectancy guard: an entry is rejected when the assumed round-trip
     # fees would consume at least this fraction of the distance to its
@@ -179,6 +195,82 @@ class Settings(BaseSettings):
     # Long-poll timeout for getUpdates. Telegram holds the request open this
     # long waiting for a message, so the loop isn't a busy-poll.
     telegram_poll_timeout_seconds: int = 30
+
+    # ── Metabolism / survival economics ──────────────────────────────────
+    # The automaton's economic self-awareness: it tracks what it costs to keep
+    # itself alive — hosting + LLM token spend (trading fees are already netted
+    # out of realized P&L) — and computes its runway: how many days of cash it
+    # has left at the current net burn. As runway runs short it SHEDS cost
+    # (switches to a cheaper model, slows its heartbeat) and, at the extreme,
+    # halts new entries and raises an alert. It never deletes itself or its
+    # infrastructure — "stops existing" means stops ACTING, with a human always
+    # able to intervene.
+    metabolism_enabled: bool = True
+    metabolism_window_days: int = 7          # trailing window for cost/revenue rates
+    # PLACEHOLDER — set to your real monthly hosting bill (Railway/VPS/etc.).
+    infra_monthly_cost_usd: float = 5.0
+    # Anthropic token pricing, USD per 1M tokens, at list price for the models
+    # configured above — override to match your plan. Used only for cost
+    # accounting, never for trading math. These must track `anthropic_model`:
+    # pricing them too high overstates burn, which shortens the computed runway
+    # and can downshift the survival tier (and damp entry size) on phantom cost.
+    #   Opus 5 / Opus 4.8 / 4.7 / 4.6 ....  5 / 25
+    #   Sonnet 5 / Sonnet 4.6 ............  3 / 15
+    #   Haiku 4.5 ........................  1 /  5
+    llm_input_cost_per_mtok: float = 5.0
+    llm_output_cost_per_mtok: float = 25.0
+    llm_low_compute_input_cost_per_mtok: float = 1.0
+    llm_low_compute_output_cost_per_mtok: float = 5.0
+    # Cheaper model the survival loop switches to when shedding compute. When
+    # anthropic_model is already the cheapest tier (the default), this switch
+    # is a no-op and shedding falls entirely to the slower poll interval below
+    # — which is the larger lever anyway: halving the call count saves more
+    # than any remaining model downgrade could.
+    llm_low_compute_model: str = "claude-haiku-4-5"
+    # Runway thresholds (days). At/under low_days → shed compute; at/under
+    # critical_days → also halt new entries. Exits are never halted.
+    survival_runway_low_days: float = 30.0
+    survival_runway_critical_days: float = 7.0
+    survival_monitor_interval_seconds: int = 300
+    # When shedding compute, the analysis poll interval is multiplied by this
+    # (slower heartbeat = fewer LLM calls = lower burn).
+    survival_low_compute_poll_multiplier: float = 3.0
+
+    # ── Holdings reconciliation ──────────────────────────────────────────
+    # The DB's open positions are a CLAIM about what the account holds, and
+    # that claim drifts (manual sells on the exchange, short fills, duplicate
+    # rows). Stale rows silently inflate exposure — blocking new entries —
+    # and fill position slots with phantoms, so the ledger is reconciled to
+    # the exchange automatically instead of waiting for someone to notice.
+    # Bookkeeping only: this NEVER buys or sells.
+    holdings_reconcile_enabled: bool = True
+    holdings_reconcile_interval_seconds: int = 300
+    # How many CONSECUTIVE cycles a coin must be missing from the account
+    # before its position is closed as not-held. A single anomalous (but
+    # successful) exchange response must not be able to wipe the ledger.
+    holdings_absence_confirmations: int = 2
+
+    # ── Policy engine ────────────────────────────────────────────────────
+    # Hard limits enforced before any consequential action (see policy.py).
+    # These are a floor under the risk engine, not a replacement for it: a
+    # sizing regression must not be able to quietly exceed them.
+    # Max USD/day the bot may spend on inference. The metabolism layer already
+    # sheds compute as runway shortens; this is the absolute ceiling — past it,
+    # analysis runs rule-based only until UTC midnight. 0 disables the cap.
+    max_daily_llm_spend_usd: float = 5.0
+    # Max new positions opened per UTC day; a signal storm or a looping
+    # strategy can't churn the account into fees. 0 disables the cap.
+    max_entries_per_day: int = 12
+
+    # ── Replication (gated) ──────────────────────────────────────────────
+    # The bot may PROPOSE running a second instance; it never provisions one.
+    # A human approves a proposal explicitly, and even then approval only
+    # marks it approved — deployment stays a human action. Sovereignty with
+    # the brake left in.
+    replication_enabled: bool = True
+    # A replica proposal is only sensible from a self-sustaining organism:
+    # the proposal is auto-rejected unless runway clears this many days.
+    replication_min_runway_days: float = 60.0
 
 
 settings = Settings()

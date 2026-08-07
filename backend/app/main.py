@@ -7,8 +7,8 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app import (
-    cross_sectional_monitor, market_analysis_monitor, notifier, position_monitor,
-    strategy_evaluator, telegram_bot,
+    cross_sectional_monitor, holdings_monitor, market_analysis_monitor, notifier,
+    position_monitor, strategy_evaluator, survival_monitor, telegram_bot,
 )
 from app.database import init_db
 from app.exchange import get_exchange, reconcile_paper_state
@@ -26,6 +26,8 @@ async def lifespan(app: FastAPI):
     market_analysis_monitor.start()
     cross_sectional_monitor.start()
     strategy_evaluator.start()
+    survival_monitor.start()
+    holdings_monitor.start()
     telegram_bot.start()
     if notifier.alerts_configured():
         await notifier.notify_event(notifier.format_startup(get_exchange().is_live))
@@ -35,6 +37,8 @@ async def lifespan(app: FastAPI):
     await market_analysis_monitor.stop()
     await cross_sectional_monitor.stop()
     await strategy_evaluator.stop()
+    await survival_monitor.stop()
+    await holdings_monitor.stop()
 
 
 app = FastAPI(title="GainzAI Crypto Trading System", lifespan=lifespan)

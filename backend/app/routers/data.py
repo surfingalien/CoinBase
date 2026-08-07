@@ -1,11 +1,25 @@
+import asyncio
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, select
 
-from app import audit as audit_mod, controls as controls_mod, notifier as notifier_mod, sentiment as sentiment_mod
+from app import (
+    audit as audit_mod, controls as controls_mod, metabolism,
+    notifier as notifier_mod, sentiment as sentiment_mod,
+)
 from app.config import ALLOWED_PAIRS, RISK_TIERS, settings
 from app.database import async_session
-from app.exchange import CoinbaseExchange, MockExchange, get_exchange
-from app.models import AuditEvent, Order, Position, Signal
+from loguru import logger
+
+from app.exchange import (
+    CoinbaseExchange,
+    MockExchange,
+    cost_basis_from_fills,
+    get_exchange,
+    plan_position_dedupe,
+)
+from app.models import AuditEvent, CostEvent, Order, Position, Signal
 from app.risk import compute_daily_pnl_pct, effective_usd_balance
 
 router = APIRouter(prefix="/api", tags=["data"])
@@ -63,6 +77,10 @@ async def get_portfolio():
                 "stop_loss_price": effective_sl,
                 "unrealized_pnl": unrealized_pnl,
                 "managed": is_managed,
+                # How entry_price was derived, so the UI can say whether P&L
+                # measures from actual purchase ("trade"/"fills") or only from
+                # the sync moment ("sync_price"/"fills_partial").
+                "basis_source": p.basis_source or "trade",
             })
 
         # Prefer the real account NAV; fall back to cash + tracked positions
@@ -226,10 +244,12 @@ async def reset_paper_trading():
         # slate — keeping it would leave a chain full of dangling signal ids.
         # Live mode never reaches this handler, so real history stays intact.
         await session.execute(delete(AuditEvent))
+        await session.execute(delete(CostEvent))
         await session.commit()
 
     if isinstance(exchange, MockExchange):
         exchange.reset()
+    metabolism.reset_state()
 
     return {"status": "reset", "usd_balance": await exchange.get_usd_balance()}
 
@@ -255,8 +275,40 @@ async def _live_crypto_holdings(exchange) -> dict:
     return {}
 
 
+# Serializes all holdings-mutating operations (sync / manage / dedupe). Sync
+# reads the tracked-positions set, then does seconds of network I/O per coin
+# before creating rows — a wide window in which a second concurrent call reads
+# the same "not tracked yet" set and creates DUPLICATE positions for the same
+# symbol. This lock closes that window (single-worker deployment).
+_holdings_lock = asyncio.Lock()
+
+
+async def _dedupe_positions(exchange) -> dict:
+    """Manual reconcile, sharing the exact logic the background reconciler
+    runs — so an on-demand cleanup and the automatic one can never diverge.
+    require_confirmation=False because a human asked for it right now and can
+    read the result, rather than waiting for the multi-cycle confirmation the
+    unattended loop uses. Bookkeeping only: never trades."""
+    from app import audit as audit_mod2, reconciler
+
+    async with async_session() as session:
+        report = await reconciler.reconcile(
+            session, exchange, require_confirmation=False, audit_module=audit_mod2,
+        )
+        await session.commit()
+    return report
+
+
 @router.post("/sync-holdings")
-async def sync_holdings(manage_exits: bool = False):
+async def sync_holdings(manage_exits: bool = False, rebase_basis: bool = False):
+    """Serialized entry point — the real work is in _sync_holdings_impl. The
+    lock prevents two concurrent syncs from each reading 'not tracked yet' and
+    both creating a row for the same coin (the 20-positions-for-8-coins bug)."""
+    async with _holdings_lock:
+        return await _sync_holdings_impl(manage_exits, rebase_basis)
+
+
+async def _sync_holdings_impl(manage_exits: bool = False, rebase_basis: bool = False):
     """Registers crypto you already hold on Coinbase as tracked positions.
 
     Default (manage_exits=false): HOLD-ONLY — the position shows in the
@@ -269,8 +321,15 @@ async def sync_holdings(manage_exits: bool = False):
     With ?manage_exits=true the bot does manage exits, but with levels
     scaled to each symbol's own volatility (2*ATR stop, 3*ATR target) rather
     than the fixed percentages, so the stop sits outside normal daily noise
-    and the reward exceeds the risk. Entry price is the current market price
-    (Coinbase's balance endpoint doesn't expose original cost basis)."""
+    and the reward exceeds the risk.
+
+    With ?rebase_basis=true, ALREADY-TRACKED synced positions get their cost
+    basis recomputed from Coinbase BUY fill history in place — for positions
+    created before fills-based basis existed (or when deeper fill history has
+    become available). Positions whose basis is the bot's own fill
+    (basis_source="trade") are never touched: that basis is exact. Exit
+    levels are left unchanged — basis is bookkeeping, exits are risk
+    management."""
     from app import market_data
     from app.risk import atr_exit_levels
     from app.technical_indicators import compute_atr
@@ -281,12 +340,28 @@ async def sync_holdings(manage_exits: bool = False):
     except Exception as exc:
         raise _exchange_error(exc) from exc
 
-    synced, skipped = [], []
+    async def _managed_exit_levels(symbol: str, anchor_price: float):
+        """ATR-scaled (stop, take_profit) anchored to anchor_price, with a
+        FIXED-PERCENT fallback that is also anchored to anchor_price when ATR
+        is unavailable. Anchoring the fallback to the current price (not the
+        cost-basis entry) is what keeps an already-profitable synced bag from
+        being instantly booked the moment it's put under management — the
+        target sits ahead of where the price is now, and the trailing stop
+        protects the gain."""
+        candles = await market_data.fetch_candles(symbol, 86400)
+        atr = compute_atr(candles["highs"], candles["lows"], candles["closes"]) if candles else None
+        stop_loss, take_profit = atr_exit_levels(anchor_price, atr)
+        if take_profit is None:
+            take_profit = anchor_price * (1 + settings.take_profit_pct)
+            stop_loss = anchor_price * (1 - settings.stop_loss_pct)
+        return stop_loss, take_profit
+
+    synced, skipped, rebased, upgraded = [], [], [], []
     async with async_session() as session:
         open_positions = (await session.execute(
             select(Position).where(Position.status == "open")
         )).scalars().all()
-        tracked = {p.symbol for p in open_positions}
+        tracked = {p.symbol: p for p in open_positions}
 
         for currency, amount in raw.items():
             symbol = f"{currency}-USD"
@@ -294,7 +369,69 @@ async def sync_holdings(manage_exits: bool = False):
                 skipped.append({"symbol": symbol, "reason": "not in the allowed trading universe"})
                 continue
             if symbol in tracked:
-                skipped.append({"symbol": symbol, "reason": "already tracked as an open position"})
+                position = tracked[symbol]
+                actions = []
+
+                # Both operations need the current price; fetch once.
+                want_rebase = rebase_basis and position.basis_source != "trade"
+                want_manage = manage_exits and position.managed is False
+                if want_rebase or want_manage:
+                    try:
+                        price = await exchange.get_price(symbol)
+                    except Exception as exc:
+                        skipped.append({"symbol": symbol, "reason": f"update failed: {exc}"})
+                        continue
+
+                if want_rebase:
+                    try:
+                        buy_fills = await exchange.get_recent_buy_fills(symbol)
+                    except Exception as exc:
+                        skipped.append({"symbol": symbol, "reason": f"rebase failed: {exc}"})
+                        continue
+                    new_entry, basis_source = cost_basis_from_fills(position.size, buy_fills, price)
+                    old_entry = position.entry_price
+                    position.entry_price = new_entry
+                    position.basis_source = basis_source
+                    position.current_price = price
+                    position.unrealized_pnl = (price - new_entry) * position.size
+                    rebased.append({
+                        "symbol": symbol,
+                        "old_entry_price": round(old_entry, 8),
+                        "new_entry_price": round(new_entry, 8),
+                        "basis_source": basis_source,
+                        "unrealized_pnl": round((price - new_entry) * position.size, 2),
+                    })
+                    actions.append("rebased")
+
+                if want_manage:
+                    # Convert a hold-only synced position to managed in place:
+                    # the monitor will now book it (ATR target on further
+                    # upside, or the trailing stop once it pulls back from a
+                    # peak). Levels anchor to the current price, so existing
+                    # gains are protected rather than market-dumped on the spot.
+                    stop_loss, take_profit = await _managed_exit_levels(symbol, price)
+                    position.managed = True
+                    position.stop_loss_price = stop_loss
+                    position.take_profit_price = take_profit
+                    position.current_price = price
+                    position.peak_price = max(position.peak_price or position.entry_price, price)
+                    upgraded.append({
+                        "symbol": symbol,
+                        "stop_loss_price": round(stop_loss, 8) if stop_loss else None,
+                        "take_profit_price": round(take_profit, 8) if take_profit else None,
+                        "note": "now managed — booked by the monitor at the ATR target or a trailing stop",
+                    })
+                    actions.append("managed")
+
+                if not actions:
+                    if position.basis_source == "trade" and rebase_basis:
+                        reason = "bot-opened position — its fill basis is exact, never rebased"
+                    elif position.managed is not False and manage_exits:
+                        reason = "already tracked and managed"
+                    else:
+                        reason = ("already tracked — pass ?manage_exits=true to manage its exits "
+                                  "or ?rebase_basis=true to refresh its cost basis")
+                    skipped.append({"symbol": symbol, "reason": reason})
                 continue
             try:
                 price = await exchange.get_price(symbol)
@@ -306,27 +443,44 @@ async def sync_holdings(manage_exits: bool = False):
                 skipped.append({"symbol": symbol, "reason": "dust (< $1)"})
                 continue
 
+            # Reconstruct the true cost basis from BUY fill history so the
+            # position's P&L measures from what was actually paid — matching
+            # Coinbase's own "All" P&L — rather than resetting to zero at the
+            # sync moment. Falls back to the sync-moment price (labelled as
+            # such) when no fills are visible: transfers in, or history the
+            # API can't see.
+            entry_price, basis_source = price, "sync_price"
+            try:
+                buy_fills = await exchange.get_recent_buy_fills(symbol)
+                entry_price, basis_source = cost_basis_from_fills(amount, buy_fills, price)
+            except Exception:
+                logger.warning(f"Sync: fill history unavailable for {symbol}; using sync-price basis")
+
             stop_loss = take_profit = None
             if manage_exits:
-                candles = await market_data.fetch_candles(symbol, 86400)
-                atr = compute_atr(candles["highs"], candles["lows"], candles["closes"]) if candles else None
-                stop_loss, take_profit = atr_exit_levels(price, atr)
+                # Anchored to the current price (with a current-price fallback
+                # when ATR is unavailable), so a synced position already above
+                # its cost basis isn't instantly booked on the first cycle.
+                stop_loss, take_profit = await _managed_exit_levels(symbol, price)
 
             session.add(Position(
                 symbol=symbol,
                 side="long",
                 size=amount,
-                entry_price=price,
+                entry_price=entry_price,
                 current_price=price,
-                peak_price=price,
-                unrealized_pnl=0.0,
+                peak_price=max(price, entry_price),
+                unrealized_pnl=(price - entry_price) * amount,
                 exit_reason=None,
                 managed=manage_exits,
                 stop_loss_price=stop_loss,
                 take_profit_price=take_profit,
+                basis_source=basis_source,
             ))
             synced.append({
-                "symbol": symbol, "size": amount, "entry_price": price,
+                "symbol": symbol, "size": amount, "entry_price": round(entry_price, 8),
+                "basis_source": basis_source,
+                "unrealized_pnl": round((price - entry_price) * amount, 2),
                 "value_usd": round(value_usd, 2), "managed": manage_exits,
                 "stop_loss_price": stop_loss, "take_profit_price": take_profit,
             })
@@ -334,15 +488,80 @@ async def sync_holdings(manage_exits: bool = False):
 
     return {
         "synced": synced,
+        "rebased": rebased,
+        "upgraded": upgraded,
         "skipped": skipped,
         "note": (
             "Synced positions are HOLD-ONLY by default: tracked in the portfolio and "
             "exposure math, never sold by the bot. Re-run with ?manage_exits=true to "
-            "have the monitor manage them with ATR-scaled exits (2*ATR stop, 3*ATR "
-            "target; falls back to the global percentages only if candle history is "
-            "unavailable). Entry price is today's market price, not original cost."
+            "have the monitor manage exits with ATR-scaled levels (2*ATR stop, 3*ATR "
+            "target, anchored to the current price; falls back to the global "
+            "percentages off the current price if candle history is unavailable) — "
+            "this now UPGRADES already-tracked hold-only positions in place, not just "
+            "newly added ones, so the monitor books them at the target or via the "
+            "trailing stop. Entry price is reconstructed from your Coinbase BUY fill "
+            "history where visible (basis_source=fills), so P&L measures from what "
+            "you actually paid; coins with no visible fills use the sync-moment "
+            "price (basis_source=sync_price). Re-run with ?rebase_basis=true to "
+            "recompute the basis of already-tracked synced positions in place "
+            "(bot-opened positions are never rebased — their fill basis is exact)."
         ),
     }
+
+
+@router.get("/holdings/manage")
+async def manage_holdings():
+    """Convenience GET so this can be triggered by simply opening a URL in a
+    phone browser — no button, no POST body, no query params. Hands every
+    hold-only synced position to the bot's exit management (ATR-scaled stop /
+    take-profit anchored to the current price) AND refreshes cost basis from
+    fill history — exactly POST /api/sync-holdings?manage_exits=true&rebase_
+    basis=true. Idempotent: already-managed and bot-opened positions are left
+    alone. After this, the "—" Take Profit / Stop Loss columns become real
+    numbers and the monitor books those positions."""
+    try:
+        exchange = get_exchange()
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    # One lock spans dedupe + manage so no concurrent sync can slip a duplicate
+    # in between them. Dedupe first (collapse the duplicate rows to match the
+    # real account), then upgrade/rebase the survivors.
+    async with _holdings_lock:
+        deduped = await _dedupe_positions(exchange)
+        result = await _sync_holdings_impl(manage_exits=True, rebase_basis=True)
+    result["deduped"] = deduped
+    upgraded = result.get("upgraded", [])
+
+    # Definitive diagnostic: after the run, list every open position that is
+    # STILL hold-only. If the sync loop couldn't reach a position — e.g. its
+    # coin no longer reports an available balance on Coinbase, so it never
+    # appears in the holdings fetch the upgrade iterates — it shows up here
+    # instead of being silently missed. An empty list means everything is
+    # managed.
+    async with async_session() as session:
+        still = (await session.execute(
+            select(Position).where(Position.status == "open", Position.managed.is_(False))
+        )).scalars().all()
+    still_hold_only = [p.symbol for p in still]
+    result["still_hold_only"] = still_hold_only
+
+    parts = []
+    n_removed = len(deduped["deleted"])
+    if n_removed:
+        parts.append(f"Removed {n_removed} duplicate position row(s)")
+    if deduped["resized"]:
+        parts.append(f"corrected size on {len(deduped['resized'])}")
+    if deduped["closed_not_held"]:
+        parts.append(f"closed {len(deduped['closed_not_held'])} no-longer-held")
+    if upgraded:
+        parts.append("now managing " + ", ".join(u["symbol"] for u in upgraded))
+    if still_hold_only:
+        parts.append("STILL hold-only: " + ", ".join(still_hold_only) + " (send this response to debug)")
+    if not parts:
+        parts.append("Everything already reconciled and managed")
+    result["summary"] = ". ".join(parts) + ". Reload the Portfolio to see the levels."
+    return result
 
 
 def _drift_rows(db_sizes: dict, exchange_sizes: dict, prices: dict) -> list:
@@ -472,6 +691,139 @@ async def verify_audit_trail():
     break, first_break pinpoints the earliest bad link."""
     async with async_session() as session:
         return await audit_mod.verify_chain(session)
+
+
+@router.get("/metabolism")
+async def get_metabolism():
+    """The automaton's economic vitals: what it costs to run (LLM + infra),
+    what it earns (trading P&L net of fees), its net daily burn, its runway in
+    days, and the current survival tier. This is the live embodiment of "if it
+    cannot pay, it stops" — a runway that runs short makes the bot shed compute
+    and, at the extreme, halt new entries."""
+    try:
+        exchange = get_exchange()
+        liquid = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        open_value = sum(
+            (p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+            for p in open_positions
+        )
+        return await metabolism.summarize(session, liquid, open_position_value=open_value)
+
+
+@router.get("/policy")
+async def get_policy():
+    """The hard limits governing every consequential action, and what they'd
+    say about the current account state. Read-only — evaluating a rule never
+    performs the action it governs."""
+    from app import policy as policy_mod
+
+    try:
+        exchange = get_exchange()
+        cash = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        deployed = sum((p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+                       for p in open_positions)
+        today = datetime.now(timezone.utc).date()
+        entries_today = len([p for p in open_positions
+                             if p.opened_at and p.opened_at.date() == today])
+
+    return {
+        "rules": [
+            {"id": r.id, "description": r.description, "priority": r.priority,
+             "applies_to": list(r.applies_to)}
+            for r in policy_mod.policy_engine.rules
+        ],
+        "limits": {
+            "max_position_pct_of_portfolio": settings.max_position_pct_of_portfolio,
+            "max_total_exposure_pct": settings.max_total_exposure_pct,
+            "max_daily_llm_spend_usd": settings.max_daily_llm_spend_usd,
+            "max_entries_per_day": settings.max_entries_per_day,
+        },
+        "current_state": {
+            "liquid_cash_usd": round(cash, 2),
+            "open_position_value_usd": round(deployed, 2),
+            "equity_usd": round(cash + deployed, 2),
+            "entries_today": entries_today,
+        },
+    }
+
+
+@router.get("/replication")
+async def get_replication():
+    """Replica proposals and their human verdicts. The bot may argue for a
+    second instance; only a human approves, and approval provisions nothing."""
+    from app.models import ReplicaProposal
+
+    async with async_session() as session:
+        proposals = (await session.execute(
+            select(ReplicaProposal).order_by(ReplicaProposal.created_at.desc()).limit(20)
+        )).scalars().all()
+    return {
+        "enabled": settings.replication_enabled,
+        "min_runway_days": settings.replication_min_runway_days,
+        "proposals": [
+            {"id": p.id, "created_at": p.created_at.isoformat() if p.created_at else None,
+             "status": p.status, "rationale": p.rationale, "economics": p.economics,
+             "decided_at": p.decided_at.isoformat() if p.decided_at else None,
+             "decided_by": p.decided_by, "decision_note": p.decision_note}
+            for p in proposals
+        ],
+        "note": ("A proposal is a recorded argument, never a provisioned machine. "
+                 "Approving records human consent; deployment stays a manual step."),
+    }
+
+
+@router.post("/replication/propose")
+async def propose_replication():
+    """Have the bot assess whether a replica is economically justified and
+    record the proposal for human review. Provisions nothing."""
+    from app import replication
+
+    try:
+        exchange = get_exchange()
+        cash = effective_usd_balance(await exchange.get_usd_balance())
+    except Exception as exc:
+        raise _exchange_error(exc) from exc
+
+    async with async_session() as session:
+        open_positions = (await session.execute(
+            select(Position).where(Position.status == "open")
+        )).scalars().all()
+        deployed = sum((p.current_price or p.entry_price or 0.0) * (p.size or 0.0)
+                       for p in open_positions)
+        summary = await metabolism.summarize(session, cash, open_position_value=deployed)
+        closed_count = len((await session.execute(
+            select(Position).where(Position.status == "closed")
+        )).scalars().all())
+        result = await replication.propose(session, summary, closed_count,
+                                           source=replication.policy.SOURCE_HUMAN)
+        await session.commit()
+    return result
+
+
+@router.post("/replication/{proposal_id}/decide")
+async def decide_replication(proposal_id: str, approve: bool, note: str | None = None):
+    """Record a human verdict on a pending replica proposal."""
+    from app import replication
+
+    async with async_session() as session:
+        result = await replication.decide(session, proposal_id, approve, note=note)
+        await session.commit()
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("reason"))
+    return result
 
 
 @router.get("/analyze/compare")

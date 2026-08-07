@@ -2,12 +2,12 @@ import { useEffect, useState } from "react";
 import {
   Bot, LayoutDashboard, Wallet, Activity, Settings as SettingsIcon, Shield, RefreshCw,
   TrendingUp, TrendingDown, Briefcase, Zap, Brain, Sparkles, CheckCircle2, XCircle, AlertTriangle, Trash2,
-  Menu, X, FlaskConical,
+  Menu, X, FlaskConical, HeartPulse,
 } from "lucide-react";
 import { cn, formatCurrency, formatRelativeTime } from "@/lib/utils";
 import {
   api, BACKTESTABLE_STRATEGIES,
-  type ClosedPosition, type CompareResult, type CompareSnapshot, type Config, type Order, type Portfolio, type Signal, type Stats, type ValidationResult,
+  type ClosedPosition, type CompareResult, type CompareSnapshot, type Config, type Order, type Portfolio, type Metabolism, type Signal, type Stats, type ValidationResult,
 } from "@/lib/api";
 
 const Card = ({ children, className }: { children: React.ReactNode; className?: string }) => (
@@ -45,6 +45,77 @@ const SectionCard = ({ title, icon: Icon, badge, children }: { title: string; ic
     {children}
   </Card>
 );
+
+/** Economic vitals: what the bot costs to run, what it earns, how long its
+ *  cash lasts, and which survival tier that puts it in. This is the visible
+ *  half of "if it cannot pay, it stops" — a short runway makes the bot shed
+ *  compute and trade smaller, and the tile says so plainly. */
+const MetabolismTile = ({ m }: { m: Metabolism }) => {
+  const TIERS: Record<string, { variant: string; label: string }> = {
+    sustainable: { variant: "success", label: "Sustainable" },
+    stable: { variant: "primary", label: "Stable" },
+    low_compute: { variant: "warning", label: "Shedding compute" },
+    critical: { variant: "danger", label: "Critical" },
+  };
+  const tier = TIERS[m.tier] ?? { variant: "default", label: m.tier };
+  const runway = m.self_sustaining
+    ? "Unbounded"
+    : m.runway_days === null ? "—" : `${m.runway_days.toFixed(0)}d`;
+  const net = m.rates_per_day.net_cashflow_usd;
+
+  return (
+    <SectionCard
+      title="Metabolism"
+      icon={HeartPulse}
+      badge={<Badge variant={tier.variant}>{tier.label}</Badge>}
+    >
+      <div className="p-5 space-y-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-foreground-muted">Runway</p>
+            <p className={cn("text-xl font-bold", m.self_sustaining ? "text-success" : "text-foreground")}>{runway}</p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-foreground-muted">Net / day</p>
+            <p className={cn("text-xl font-bold", net >= 0 ? "text-success" : "text-danger")}>
+              {formatCurrency(net)}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-foreground-muted">Cost / day</p>
+            <p className="text-xl font-bold">{formatCurrency(m.rates_per_day.operating_cost_usd)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-foreground-muted">Equity</p>
+            <p className="text-xl font-bold">{formatCurrency(m.equity_usd)}</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-foreground-muted">
+          <span>LLM {formatCurrency(m.costs.llm_usd)} + infra {formatCurrency(m.costs.infra_usd)} over {m.window_days}d</span>
+          <span className="hidden sm:inline">·</span>
+          <span>Earned {formatCurrency(m.revenue.trading_net_pnl_usd)}</span>
+          <span className="hidden sm:inline">·</span>
+          <span>Model: {m.active_model}</span>
+        </div>
+
+        {(m.shedding_compute || m.entries_halted || m.entry_size_multiplier < 1) && (
+          <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs text-foreground-muted space-y-1">
+            {m.shedding_compute && (
+              <p>Shedding compute: cheaper model and a slower analysis heartbeat to extend runway.</p>
+            )}
+            {m.entry_size_multiplier < 1 && !m.entries_halted && (
+              <p>New entries damped to {(m.entry_size_multiplier * 100).toFixed(0)}% size — still trading, to earn runway back.</p>
+            )}
+            {m.entries_halted && (
+              <p className="text-danger">Entries paused: liquid cash can't fund a minimum order. Exits still run.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </SectionCard>
+  );
+};
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -119,11 +190,13 @@ export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
   const [config, setConfig] = useState<Config | null>(null);
+  const [metabolism, setMetabolism] = useState<Metabolism | null>(null);
 
   const fetchData = async () => {
     setIsLoading(true);
-    const [p, s, o, st, ch, cfg] = await Promise.allSettled([
+    const [p, s, o, st, ch, cfg, met] = await Promise.allSettled([
       api.portfolio(), api.signals(), api.orders(), api.stats(), api.positionHistory(), api.config(),
+      api.metabolism(),
     ]);
     if (p.status === "fulfilled") setPortfolio(p.value);
     if (s.status === "fulfilled") setSignals(s.value);
@@ -131,6 +204,9 @@ export default function App() {
     if (st.status === "fulfilled") setStats(st.value);
     if (ch.status === "fulfilled") setClosedPositions(ch.value);
     if (cfg.status === "fulfilled") setConfig(cfg.value);
+    // Metabolism is supplementary — a failure here must never blank the
+    // dashboard, so it's deliberately excluded from the failure tally below.
+    if (met.status === "fulfilled") setMetabolism(met.value);
 
     const failures = [
       ["portfolio", p], ["signals", s], ["orders", o],
@@ -228,7 +304,7 @@ export default function App() {
               </div>
             )}
             {activeTab === "dashboard" && (
-              <DashboardTab isLoading={isLoading} portfolio={portfolio} stats={stats} signals={signals} orders={orders} />
+              <DashboardTab isLoading={isLoading} portfolio={portfolio} stats={stats} signals={signals} orders={orders} metabolism={metabolism} />
             )}
             {activeTab === "portfolio" && (
               <PortfolioTab isLoading={isLoading} portfolio={portfolio} closedPositions={closedPositions} />
@@ -255,8 +331,9 @@ export default function App() {
   );
 }
 
-function DashboardTab({ isLoading, portfolio, stats, signals, orders }: {
+function DashboardTab({ isLoading, portfolio, stats, signals, orders, metabolism }: {
   isLoading: boolean; portfolio: Portfolio | null; stats: Stats | null; signals: Signal[]; orders: Order[];
+  metabolism: Metabolism | null;
 }) {
   return (
     <>
@@ -283,7 +360,9 @@ function DashboardTab({ isLoading, portfolio, stats, signals, orders }: {
                 <div className={cn("flex items-center gap-1.5", (stats?.total_pnl || 0) >= 0 ? "text-success" : "text-danger")}>
                   {(stats?.total_pnl || 0) >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
                   <span className="text-sm font-semibold">{formatCurrency(stats?.total_pnl)}</span>
-                  <span className="text-xs text-foreground-muted">total P&L</span>
+                  <span className="text-xs text-foreground-muted">
+                    P&L since tracked ({formatCurrency(stats?.realized_pnl)} realized / {formatCurrency(stats?.unrealized_pnl)} open)
+                  </span>
                 </div>
                 <div className="h-4 w-px bg-border" />
                 <Badge variant={(stats?.win_rate || 0) >= 50 ? "success" : "warning"}>{stats?.win_rate ?? 0}% win rate</Badge>
@@ -302,6 +381,8 @@ function DashboardTab({ isLoading, portfolio, stats, signals, orders }: {
           </div>
         </Card>
       )}
+
+      {metabolism?.enabled && <MetabolismTile m={metabolism} />}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2 space-y-6 flex flex-col">
@@ -892,15 +973,17 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
 
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
-  const handleSync = async () => {
+  const runSync = async (opts?: { manage_exits?: boolean; rebase_basis?: boolean }) => {
     setSyncing(true);
     setSyncResult(null);
     try {
-      const r = await api.syncHoldings();
-      const syncedTxt = r.synced.length
-        ? r.synced.map((s) => `${s.symbol} (${formatCurrency(s.value_usd)})`).join(", ")
-        : "none";
-      setSyncResult(`Synced: ${syncedTxt}. Skipped: ${r.skipped.length}.`);
+      const r = await api.syncHoldings(opts);
+      const parts: string[] = [];
+      if (r.synced.length) parts.push(`Synced ${r.synced.length} new`);
+      if (r.upgraded?.length) parts.push(`Now managing exits on ${r.upgraded.map((u) => u.symbol).join(", ")}`);
+      if (r.rebased?.length) parts.push(`Refreshed cost basis on ${r.rebased.length}`);
+      if (!parts.length) parts.push(`No changes (skipped ${r.skipped.length})`);
+      setSyncResult(parts.join(". ") + ".");
       onReset();
     } catch (err) {
       setSyncResult(err instanceof Error ? err.message : "Sync failed.");
@@ -967,20 +1050,34 @@ function SettingsTab({ isLoading, config, onReset }: { isLoading: boolean; confi
           <StatRow label="Allowed trading pairs" value={config.allowed_pairs.length} />
           <div className="space-y-2">
             <p className="text-xs text-foreground-muted leading-relaxed">
-              Register crypto you already hold on Coinbase as tracked positions
-              so the bot manages their exits (take-profit / stop-loss). Entry is
-              set to the current price. Don't sync a coin you want to hold long-term.
+              Register crypto you already hold on Coinbase as tracked positions.
+              <strong> Sync</strong> adds them hold-only (tracked, never sold).
+              <strong> Manage exits</strong> hands them to the bot with ATR-scaled
+              take-profit / stop-loss and refreshes cost basis from your buy
+              history — this also upgrades positions you already synced. Don't
+              manage a coin you want to hold long-term.
             </p>
             {syncResult && <p className="text-xs text-foreground-muted">{syncResult}</p>}
-            <button
-              type="button"
-              onClick={handleSync}
-              disabled={syncing}
-              className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-all disabled:opacity-50"
-            >
-              <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
-              {syncing ? "Syncing…" : "Sync holdings from Coinbase"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => runSync()}
+                disabled={syncing}
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+                {syncing ? "Syncing…" : "Sync holdings (hold-only)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => runSync({ manage_exits: true, rebase_basis: true })}
+                disabled={syncing}
+                className="inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/20 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+                {syncing ? "Working…" : "Manage exits + refresh basis"}
+              </button>
+            </div>
           </div>
         </div>
       </SectionCard>

@@ -11,62 +11,133 @@ from typing import Any, Dict
 from loguru import logger
 from sqlalchemy import select
 
-from app import audit, controls, notifier, regime, strategy_evaluator, strategy_gate
+from app import (
+    audit, controls, metabolism, notifier, policy, regime, strategy_evaluator,
+    strategy_gate,
+)
 from app.ai_engine import ai_engine
 from app.config import ALLOWED_PAIRS, settings
 from app.database import async_session
 from app.exchange import get_exchange
 from app.models import Order, Position, Signal
 from app.risk import (
+    FRICTION_LOOKBACK_TRADES,
     PERFORMANCE_LOOKBACK_TRADES,
+    apply_fee_floor,
     assumed_round_trip_fee_pct,
     compute_daily_pnl_pct,
+    effective_round_trip_cost_pct,
     effective_usd_balance,
+    measured_round_trip_friction_pct,
     performance_multiplier,
+    sanitize_exit_levels,
     size_trade,
 )
 
 
+# A sell that delivers at least this fraction of the requested size counts as
+# a full close; the remainder is dust below an exchange increment.
+_FULL_CLOSE_FILL_RATIO = 0.99
+
+# Exits that can afford to rest as a post-only limit for the maker fee tier:
+# the target was reached, or the strategy simply no longer wants the position.
+# Nothing is going wrong, so a short wait for a better fill is free.
+#
+# Everything NOT listed here goes out at market, and that is the safety
+# property: a stop-loss or trailing stop fires precisely because price is
+# moving against the position, and a resting sell on the ask side of a falling
+# book may never fill at all. Saving ~25 basis points is not worth turning a
+# bounded loss into an unbounded one. Anything unrecognised — a manual close, a
+# reason added later — is treated as protective by omission, which is the safe
+# default rather than an oversight.
+PATIENT_EXIT_REASONS = frozenset({"take_profit", "sell_signal"})
+
+
 async def _close_position(session, exchange, position: Position, reason: str) -> bool:
-    """Sells exactly the position's size and records realized P&L."""
+    """Sells the position and records realized P&L on what ACTUALLY filled.
+
+    A live SELL is not guaranteed to move the whole requested size: the
+    exchange client caps the order at the balance actually held and floors it
+    to the product's base increment, so whenever the DB's size overstates the
+    real holding (drift, or the duplicate-row bug) the fill comes back short.
+    Booking that as a full close would compute P&L on coins that were never
+    sold and mark the position closed while real coins remain — silently
+    orphaning them. So: all money math uses filled_size, and a materially
+    short fill REDUCES the position instead of closing it, leaving the
+    remainder to be retried (or surfaced as a failure the audit trail
+    explains) rather than lost.
+    """
+    requested = position.size or 0.0
     order_result = await exchange.place_market_order(
-        symbol=position.symbol, side="SELL", base_size=position.size,
+        symbol=position.symbol, side="SELL", base_size=requested,
+        allow_maker=reason in PATIENT_EXIT_REASONS,
     )
     if not order_result.get("success"):
         logger.error(f"Close failed for {position.symbol}: {order_result.get('error')}")
         await audit.record(session, "order_failed", symbol=position.symbol, payload={
-            "side": "SELL", "size": position.size, "reason": reason,
+            "side": "SELL", "size": requested, "reason": reason,
             "error": str(order_result.get("error")),
         })
         return False
 
     exit_price = order_result["avg_price"]
     exit_fees = order_result.get("fees_usd") or 0.0
+    # Never trust the request over the fill.
+    filled = float(order_result.get("filled_size") or 0.0)
+    if filled <= 0:
+        logger.error(f"Close for {position.symbol} reported success with a zero fill; leaving position open")
+        await audit.record(session, "order_failed", symbol=position.symbol, payload={
+            "side": "SELL", "size": requested, "reason": reason,
+            "error": "order reported success but filled_size was zero",
+        })
+        return False
+
     session.add(Order(
         symbol=position.symbol,
         side="SELL",
-        quote_size_usd=position.size * exit_price,
-        size=position.size,
+        quote_size_usd=filled * exit_price,
+        size=filled,
         avg_fill_price=exit_price,
         fees_usd=exit_fees,
         status="filled",
         is_live=exchange.is_live,
     ))
-    position.current_price = exit_price
-    # Realized P&L is net cash: sale proceeds minus purchase cost, with the
-    # fees actually charged on both sides taken out — matching the account.
-    position.realized_pnl = (
-        (exit_price - position.entry_price) * position.size
+
+    # Entry fees are apportioned to the fraction actually sold, so a partial
+    # exit doesn't charge the whole entry cost against part of the position.
+    sold_fraction = min(1.0, filled / requested) if requested > 0 else 1.0
+    realized = (
+        (exit_price - position.entry_price) * filled
         - exit_fees
-        - (position.entry_fees_usd or 0.0)
+        - (position.entry_fees_usd or 0.0) * sold_fraction
     )
-    position.unrealized_pnl = 0.0
-    position.status = "closed"
-    position.closed_at = datetime.now(timezone.utc)
-    position.exit_reason = reason
+    position.current_price = exit_price
+
+    if sold_fraction >= _FULL_CLOSE_FILL_RATIO:
+        position.realized_pnl = (position.realized_pnl or 0.0) + realized
+        position.unrealized_pnl = 0.0
+        position.status = "closed"
+        position.closed_at = datetime.now(timezone.utc)
+        position.exit_reason = reason
+    else:
+        # Partial: bank what was sold, keep the rest of the position alive.
+        remaining = max(0.0, requested - filled)
+        position.realized_pnl = (position.realized_pnl or 0.0) + realized
+        position.size = remaining
+        position.entry_fees_usd = (position.entry_fees_usd or 0.0) * (1 - sold_fraction)
+        position.unrealized_pnl = (exit_price - position.entry_price) * remaining
+        logger.warning(
+            f"[PARTIAL EXIT] {position.symbol}: sold {filled:.8f} of {requested:.8f} "
+            f"({sold_fraction:.1%}); {remaining:.8f} left open. Usually means the "
+            f"tracked size exceeded the balance actually held."
+        )
+
     await audit.record(session, "position_closed", symbol=position.symbol, payload={
         "position_id": position.id,
-        "size": position.size,
+        "requested_size": requested,
+        "filled_size": filled,
+        "partial": sold_fraction < _FULL_CLOSE_FILL_RATIO,
+        "remaining_size": position.size if sold_fraction < _FULL_CLOSE_FILL_RATIO else 0.0,
         "entry_price": position.entry_price,
         "exit_price": exit_price,
         "realized_pnl": position.realized_pnl,
@@ -74,13 +145,17 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
         "is_live": exchange.is_live,
     })
     # Push an exit alert (covers both SELL-signal and monitor auto-exits, since
-    # both close through here). No-op when Telegram isn't configured.
+    # both close through here). Reports THIS exit's realized P&L, not the
+    # position's cumulative total, and labels a partial fill honestly — the
+    # position is still open in that case. No-op when Telegram isn't configured.
+    is_partial = sold_fraction < _FULL_CLOSE_FILL_RATIO
     pnl_pct = (
         (exit_price - position.entry_price) / position.entry_price
         if position.entry_price else None
     )
     notifier.notify_soon(notifier.format_exit(
-        position.symbol, reason, exit_price, position.realized_pnl, pnl_pct, exchange.is_live,
+        position.symbol, reason, exit_price, realized, pnl_pct, exchange.is_live,
+        partial=is_partial, remaining_size=position.size if is_partial else None,
     ))
     return True
 
@@ -140,6 +215,18 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             if len(open_positions) >= settings.max_open_positions:
                 await reject(f"Max open positions ({settings.max_open_positions}) reached.")
                 await session.commit()
+                return
+
+            # Survival breaker: a hard halt applies ONLY when liquid cash
+            # can't fund a minimum order (an entry is physically impossible).
+            # A short runway never halts — it damps entry size further down
+            # this function, because trading is the only revenue source and
+            # halting it would lock a burning account into certain death.
+            # Exits are never affected, and a human can always intervene.
+            if metabolism.entries_halted():
+                await reject(metabolism.halt_reason())
+                await session.commit()
+                logger.info(f"Signal {signal_id} blocked: liquid cash below minimum order size")
                 return
 
             # Evaluator verdict: a strategy demoted for negative live
@@ -239,11 +326,17 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             .limit(PERFORMANCE_LOOKBACK_TRADES)
         )).scalars().all()
         perf_mult = performance_multiplier(recent_closed)
-        size_multiplier = ai_result["size_multiplier"] * perf_mult
+        survival_mult = metabolism.entry_size_multiplier()
+        size_multiplier = ai_result["size_multiplier"] * perf_mult * survival_mult
         if perf_mult != 1.0:
             signal.ai_reasoning += (
                 f" Strategy's recent record scaled the entry {perf_mult:.2f}x "
                 f"({len(recent_closed)} closed trades considered)."
+            )
+        if survival_mult != 1.0:
+            signal.ai_reasoning += (
+                f" [Survival: runway is critical — entry damped to "
+                f"{survival_mult:.0%} size so the bot keeps earning while it preserves capital.]"
             )
 
         # Take-profit distance for the fee-expectancy check: the signal's own
@@ -254,6 +347,39 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         if ta_tp and signal_price > 0:
             take_profit_pct = max(0.0, float(ta_tp) / signal_price - 1.0) or settings.take_profit_pct
 
+        # Fee-aware target floor: an ATR-scale target tighter than the fee
+        # gate's minimum viable distance is extended to that floor (when the
+        # symbol's volatility can plausibly reach it), so a strong setup
+        # trades with a cost-covering target instead of being rejected. The
+        # stored take-profit is updated to match so the position monitor
+        # exits at the floored target, not the original tight one.
+        # Friction is a property of the venue and the book, not of a strategy,
+        # so this pool is deliberately unfiltered — every closed trade is
+        # evidence about what a round trip costs here.
+        friction_sample = (await session.execute(
+            select(Position)
+            .where(Position.status == "closed")
+            .order_by(Position.closed_at.desc())
+            .limit(FRICTION_LOOKBACK_TRADES)
+        )).scalars().all()
+
+        take_profit_pct, fee_floored = apply_fee_floor(
+            take_profit_pct, signal_price, signal_data.get("atr"), friction_sample
+        )
+        if fee_floored:
+            signal_data["ta_take_profit"] = round(signal_price * (1 + take_profit_pct), 8)
+            signal.ai_reasoning += (
+                f" [Fee-aware target: the ATR target was inside the fee floor — "
+                f"take-profit extended to {take_profit_pct:.2%} so the trade clears its costs.]"
+            )
+        measured = measured_round_trip_friction_pct(friction_sample)
+        if measured is not None and measured > assumed_round_trip_fee_pct():
+            signal.ai_reasoning += (
+                f" [Measured round-trip cost is {measured:.2%} vs the "
+                f"{assumed_round_trip_fee_pct():.2%} fee assumption — slippage included; "
+                f"the target floor uses the measured figure.]"
+            )
+
         open_position_value = sum(
             (p.current_price or p.entry_price) * p.size for p in open_positions
         )
@@ -262,7 +388,7 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             ai_size_multiplier=size_multiplier,
             usd_balance=usd_balance,
             daily_pnl_pct=daily_pnl_pct,
-            round_trip_fee_pct=assumed_round_trip_fee_pct(),
+            round_trip_fee_pct=effective_round_trip_cost_pct(friction_sample),
             take_profit_pct=take_profit_pct,
             open_position_value=open_position_value,
         )
@@ -273,11 +399,55 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             "usd_balance": usd_balance,
             "daily_pnl_pct": daily_pnl_pct,
             "performance_multiplier": perf_mult,
+            "take_profit_pct": take_profit_pct,
+            "fee_floor_applied": fee_floored,
         })
         if sizing.rejected:
             await reject(f"{signal.ai_reasoning} [Risk check: {sizing.reason}]")
             await session.commit()
             logger.info(f"Signal {signal_id} rejected by risk manager: {sizing.reason}")
+            return
+
+        # Policy gate: the last hard check before capital moves. risk.py sized
+        # the trade; the policy engine decides whether it is ALLOWED at all —
+        # per-position cap, aggregate exposure, cash reserve, daily entry rate.
+        # It's a floor under the risk engine, so a sizing regression can't
+        # quietly exceed a hard limit. Every verdict lands on the audit chain.
+        # Count today's entries from filled BUY ORDERS, not from currently-open
+        # positions: a position opened and closed today is still an entry, and
+        # counting only open ones would let a rapid open/close churn slip past
+        # the daily cap — exactly the behaviour the cap exists to stop.
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        entries_today = len((await session.execute(
+            select(Order).where(
+                Order.side == "BUY", Order.status == "filled", Order.timestamp >= today_start
+            )
+        )).scalars().all())
+        policy_decision = policy.policy_engine.evaluate(policy.PolicyRequest(
+            action=policy.ACTION_OPEN_POSITION,
+            args={"quote_size_usd": sizing.quote_size_usd, "symbol": symbol},
+            source=policy.SOURCE_WEBHOOK if strategy != "Native_TA_AI" else policy.SOURCE_NATIVE,
+            context={
+                "equity_usd": usd_balance + open_position_value,
+                "open_position_value_usd": open_position_value,
+                "liquid_cash_usd": usd_balance,
+                "entries_today": entries_today,
+            },
+        ))
+        await audit.record(session, "policy_check", signal_id=signal_id, symbol=symbol, payload={
+            "action": policy_decision.action,
+            "reason_code": policy_decision.reason_code,
+            "reason": policy_decision.human_message,
+            "rules_evaluated": policy_decision.rules_evaluated,
+            "rules_triggered": policy_decision.rules_triggered,
+        })
+        if not policy_decision.allowed:
+            await reject(f"{signal.ai_reasoning} [Policy: {policy_decision.human_message}]")
+            await session.commit()
+            logger.warning(
+                f"Signal {signal_id} blocked by policy "
+                f"({policy_decision.reason_code}): {policy_decision.human_message}"
+            )
             return
 
         order_result = await exchange.place_market_order(
@@ -314,6 +484,21 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             status="filled",
             is_live=exchange.is_live,
         ))
+        # The levels were computed against the signal's price; the position is
+        # opened at the FILL price. Where those disagree enough that a level no
+        # longer brackets the entry, the monitor's first tick would exit
+        # immediately at a pure-fee loss — so re-derive from what was paid.
+        tp_price, sl_price, level_fixes = sanitize_exit_levels(
+            entry_price,
+            signal_data.get("ta_take_profit"),
+            signal_data.get("ta_stop_loss"),
+            take_profit_pct,
+        )
+        if level_fixes:
+            logger.warning(f"Signal {signal_id} exit levels corrected for {symbol}: "
+                           f"{'; '.join(level_fixes)}")
+            signal.ai_reasoning += f" [Exit levels corrected: {'; '.join(level_fixes)}.]"
+
         session.add(Position(
             symbol=symbol,
             side="long",
@@ -321,10 +506,11 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
             entry_price=entry_price,
             current_price=entry_price,
             peak_price=entry_price,
-            take_profit_price=signal_data.get("ta_take_profit"),
-            stop_loss_price=signal_data.get("ta_stop_loss"),
+            take_profit_price=tp_price,
+            stop_loss_price=sl_price,
             entry_fees_usd=entry_fees,
             strategy=strategy,
+            basis_source="trade",
         ))
 
         signal.status = "executed"
