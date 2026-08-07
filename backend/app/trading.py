@@ -79,7 +79,7 @@ async def _close_position(session, exchange, position: Position, reason: str) ->
         (exit_price - position.entry_price) / position.entry_price
         if position.entry_price else None
     )
-    await notifier.notify_event(notifier.format_exit(
+    notifier.notify_soon(notifier.format_exit(
         position.symbol, reason, exit_price, position.realized_pnl, pnl_pct, exchange.is_live,
     ))
     return True
@@ -330,6 +330,6 @@ async def process_signal(signal_data: Dict[str, Any], signal_id: str) -> None:
         signal.status = "executed"
         await session.commit()
         logger.info(f"Signal {signal_id} executed: BUY {symbol} for ${sizing.quote_size_usd:.2f}")
-        await notifier.notify_event(notifier.format_entry(
+        notifier.notify_soon(notifier.format_entry(
             symbol, strategy, sizing.quote_size_usd, entry_price, ai_result["confidence"],
         ))

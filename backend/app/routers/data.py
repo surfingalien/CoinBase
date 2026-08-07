@@ -436,7 +436,7 @@ async def pause_trading(paused: bool = True):
     commands so the switch is reachable from the dashboard too."""
     async with async_session() as session:
         await controls_mod.set_trading_paused(session, paused, by="dashboard")
-    await notifier_mod.notify_event(notifier_mod.format_paused(paused, by="dashboard"))
+    notifier_mod.notify_soon(notifier_mod.format_paused(paused, by="dashboard"))
     return {"trading_paused": paused}
 
 

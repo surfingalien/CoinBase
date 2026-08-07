@@ -7,6 +7,7 @@ helpers are pure functions so they can be unit-tested without a network.
 
 Sends never raise into the caller — a Telegram outage must not break a trade.
 """
+import asyncio
 import html
 from typing import Any, Dict, Optional
 
@@ -111,8 +112,38 @@ async def send(text: str, *, chat_id: Optional[str] = None,
 
 
 async def notify_event(text: str) -> None:
-    """Fire-and-forget alert used by the trading pipeline. Gated on
-    alerts_configured() so no work happens when unconfigured."""
+    """Send an alert and wait for it. Only for paths where blocking is fine
+    (e.g. the startup ping). The trading pipeline must use notify_soon()."""
     if not alerts_configured():
         return
     await send(text)
+
+
+# Strong references to in-flight alert tasks. asyncio only holds weak
+# references to tasks, so without this a pending send can be garbage-collected
+# mid-flight and silently dropped.
+_pending: set = set()
+
+
+def notify_soon(text: str) -> None:
+    """Queue an alert WITHOUT blocking the caller.
+
+    The trading pipeline calls this from the exit path, which runs inside the
+    position monitor's loop over open positions. Awaiting an HTTP request there
+    would let a slow or hanging Telegram delay the exit checks of every
+    position behind it in the same cycle — latency injected into the most
+    safety-critical path in the system. Alerts are best-effort telemetry about
+    an order that has already been placed, so they must never gate it.
+
+    send() never raises, so these tasks cannot surface unhandled exceptions.
+    """
+    if not alerts_configured():
+        return
+    try:
+        task = asyncio.create_task(send(text))
+    except RuntimeError:
+        # No running loop (e.g. called from sync context in a test) — drop it
+        # rather than raising into a trade.
+        return
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)

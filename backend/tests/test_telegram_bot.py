@@ -113,3 +113,71 @@ def test_pause_defaults_false_then_toggles(controls_db):
     assert before is False
     assert paused is True
     assert resumed is False
+
+
+# ── Alerts must never block the trading pipeline ──────────────────────────────
+
+def test_notify_soon_returns_immediately_even_when_send_hangs(monkeypatch):
+    """The exit path calls this from inside the position monitor's loop over
+    open positions. If it awaited the HTTP request, a hanging Telegram would
+    delay every position's exit check behind it in the same cycle."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "telegram_bot_token", "t", raising=False)
+    monkeypatch.setattr(settings, "telegram_chat_id", "1", raising=False)
+    monkeypatch.setattr(settings, "telegram_alerts_enabled", True, raising=False)
+
+    started = asyncio.Event()
+
+    async def hanging_send(text, **kwargs):
+        started.set()
+        await asyncio.sleep(30)  # simulate a wedged Telegram
+        return False
+
+    monkeypatch.setattr(notifier, "send", hanging_send)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        notifier.notify_soon("exit alert")
+        elapsed = loop.time() - began
+        # Let the task actually start so we know it was scheduled, not dropped.
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert notifier._pending, "in-flight task must be strongly referenced"
+        tasks = list(notifier._pending)
+        for task in tasks:
+            task.cancel()
+        # Let cancellation land so the done_callback drains the module-level
+        # set — otherwise this test leaks state into the next one.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert not notifier._pending, "completed tasks must be released"
+        return elapsed
+
+    elapsed = asyncio.new_event_loop().run_until_complete(run())
+    assert elapsed < 0.1, f"notify_soon blocked the caller for {elapsed:.2f}s"
+
+
+def test_notify_soon_is_a_noop_when_unconfigured(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "telegram_bot_token", "", raising=False)
+    monkeypatch.setattr(settings, "telegram_chat_id", "", raising=False)
+
+    async def run():
+        before = len(notifier._pending)
+        notifier.notify_soon("should not be sent")
+        return len(notifier._pending) - before
+
+    # Compare the delta, not the absolute count: _pending is module-level and
+    # shared with every other test in the process.
+    assert asyncio.new_event_loop().run_until_complete(run()) == 0
+
+
+def test_notify_soon_outside_an_event_loop_does_not_raise(monkeypatch):
+    """Defensive: a sync caller must never take down a trade."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "telegram_bot_token", "t", raising=False)
+    monkeypatch.setattr(settings, "telegram_chat_id", "1", raising=False)
+    monkeypatch.setattr(settings, "telegram_alerts_enabled", True, raising=False)
+    notifier.notify_soon("no running loop here")  # must not raise
