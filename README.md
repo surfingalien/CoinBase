@@ -56,12 +56,15 @@ backend/         FastAPI app (paper + live trading engine)
     backtest.py            pre-deploy validation: IS/OOS Sharpe, drawdown, overfit checks
     audit.py               tamper-evident SHA-256 hash-chained audit trail of every
                            pipeline step (signal -> gates -> AI -> risk -> order -> close)
+    controls.py            runtime pause switch (restart-safe, in system_state table)
+    notifier.py            Telegram push alerts for entries/exits/pause (optional)
+    telegram_bot.py        Telegram command bot: /status /pnl /positions /pause /resume
     routers/
       webhook.py    POST /webhook/tradingview
       data.py       GET /api/portfolio, /api/signals, /api/orders, /api/stats,
                     /api/positions/history, /api/momentum/rankings, /api/validate,
                     /api/audit, /api/audit/verify, /api/analyze/compare,
-                    /api/config; POST /api/reset
+                    /api/controls, /api/config; POST /api/reset, /api/controls/pause
     main.py         FastAPI app wiring
 frontend/        React + Vite + Tailwind dashboard (Dashboard / Portfolio /
                  Signals / Risk Manager / Settings tabs, all live-data)
@@ -261,6 +264,38 @@ it's needed.
 This is a real cost tradeoff against the token-efficiency work above: each
 search is billed separately from token usage. Set `ENABLE_WEB_RESEARCH=false`
 to run on cached sentiment/news alone with zero search cost.
+
+## Telegram bot gateway (optional)
+
+Get trade alerts and control the bot from your phone. Entirely opt-in — with
+no token set, the notifier is a silent no-op and the command bot never starts,
+so the trading pipeline behaves exactly as before.
+
+1. Message **@BotFather** on Telegram → `/newbot` → copy the token into
+   `TELEGRAM_BOT_TOKEN`.
+2. Send your new bot any message, open
+   `https://api.telegram.org/bot<token>/getUpdates`, and copy the numeric
+   `chat.id` into `TELEGRAM_CHAT_ID`.
+
+**Push alerts** fire on every entry, every exit (with the reason and realized
+P&L), and on pause/resume — plus a one-line ping when the bot boots.
+
+**Commands** (only the configured chat is answered; anyone else gets a terse
+"Not authorized"):
+
+| Command | Does |
+|---------|------|
+| `/status` | mode (live/paper), pause state, open-position count |
+| `/pnl` | realized + unrealized P&L and win rate |
+| `/positions` | every open position with its live mark and unrealized P&L |
+| `/signals` | the last few signals and how they resolved |
+| `/pause` | **kill-switch** — blocks new entries; exits keep running |
+| `/resume` | allow new entries again |
+
+The pause switch is restart-safe (stored in the `system_state` table) and is
+also on the dashboard's Settings tab and `POST /api/controls/pause?paused=true`
+— all three routes flip the same flag. Pausing never blocks exits: a held
+position always closes normally on its take-profit/stop-loss.
 
 ## Risk framework (enforced, not aspirational)
 
